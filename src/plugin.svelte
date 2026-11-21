@@ -16,6 +16,9 @@
         <div class="tab clickable" class:active={source === 'file'} on:click={() => (source = 'file')}>
             Archivo
         </div>
+        <div class="tab clickable" class:active={source === 'gps'} on:click={() => (source = 'gps')}>
+            GPS tablet
+        </div>
         <div
             class="tab clickable"
             class:active={source === 'serial'}
@@ -33,6 +36,18 @@
             Cargar track (GPX, CSV, NMEA, JSON)
             <input type="file" accept=".gpx,.csv,.txt,.nmea,.log,.json,.geojson" on:change={onFile} />
         </label>
+    {:else if source === 'gps'}
+        {#if !geoSupported}
+            <p class="size-xs warn">Este navegador no tiene acceso al GPS.</p>
+        {:else}
+            <p class="size-xs mb-5 hint">
+                Usa el GPS de este dispositivo. El pronóstico se mantiene en la hora actual.
+            </p>
+            <label class="size-xs check mb-10">
+                <input type="checkbox" bind:checked={useCompass} disabled={!!live} />
+                Rumbo con la brújula (tablet alineada con la proa)
+            </label>
+        {/if}
     {:else if source === 'serial'}
         {#if !serialSupported}
             <p class="size-xs warn">
@@ -74,7 +89,8 @@
         {:else}
             <div
                 class="button button--variant-orange size-s mb-10"
-                class:disabled={source === 'serial' && !serialSupported}
+                class:disabled={(source === 'serial' && !serialSupported) ||
+                    (source === 'gps' && !geoSupported)}
                 on:click={startLive}
             >
                 ● Conectar en vivo
@@ -161,6 +177,35 @@
     {#if points.length}
         <div class="button size-xs mt-10" on:click={clearTrack}>Borrar track</div>
     {/if}
+
+    <!-- Ruta de referencia (no usa horas, no cambia el pronóstico) -->
+    <div class="ref mt-15">
+        <div class="size-xs lbl">Ruta de referencia</div>
+        {#if refPoints.length}
+            <div class="size-xs mb-5">
+                <span class="ref-swatch"></span>
+                {refName} · {refDistance.toFixed(1)} NM
+            </div>
+            {#if current && refInfo}
+                <div class="size-xs mb-5">
+                    Desvío {refInfo.xte.toFixed(2)} NM · Faltan {refInfo.remaining.toFixed(1)} NM
+                </div>
+            {/if}
+            <div class="row">
+                <div class="button size-xs" on:click={fitRef}>Encuadrar</div>
+                <div class="button size-xs" on:click={clearRef}>Quitar</div>
+            </div>
+        {:else}
+            <label class="button size-xs file-btn">
+                Cargar ruta (GPX, CSV, NMEA, JSON)
+                <input
+                    type="file"
+                    accept=".gpx,.csv,.txt,.nmea,.log,.json,.geojson"
+                    on:change={onRefFile}
+                />
+            </label>
+        {/if}
+    </div>
 </section>
 
 <script lang="ts">
@@ -176,15 +221,30 @@
 
     import config from './pluginConfig';
     import { parseFile } from './parsers';
-    import { bearing, distanceNm, norm360, pointOfSail, trueWindAngle } from './geo';
+    import {
+        bearing,
+        distanceNm,
+        norm360,
+        pointOfSail,
+        routeLength,
+        routeProgress,
+        trueWindAngle,
+    } from './geo';
     import { createBoatIcon, setBoatRotation, setWindArrow } from './boatIcon';
-    import { isSerialSupported, startHttpPolling, startSerial } from './live';
+    import {
+        isGeolocationSupported,
+        isSerialSupported,
+        startGeolocation,
+        startHttpPolling,
+        startSerial,
+    } from './live';
 
     import type { LiveSource } from './live';
     import type { PartialPoint, TrackPoint } from './types';
 
     const { title } = config;
     const serialSupported = isSerialSupported();
+    const geoSupported = isGeolocationSupported();
 
     /* ---------------- persisted settings ---------------- */
     const SETTINGS_KEY = 'windy-plugin-itrip-settings';
@@ -197,20 +257,125 @@
     };
     const saved = loadSettings();
 
-    let source: 'file' | 'serial' | 'http' = (saved.source as 'file') || 'file';
+    let source: 'file' | 'gps' | 'serial' | 'http' = (saved.source as 'file') || 'file';
     let baudRate = (saved.baudRate as number) || 9600;
     let httpUrl = (saved.httpUrl as string) || '';
     let pollSeconds = (saved.pollSeconds as number) || 2;
     let syncTime = saved.syncTime !== false;
     let follow = saved.follow !== false;
+    let useCompass = saved.useCompass === true;
 
     $: try {
         localStorage.setItem(
             SETTINGS_KEY,
-            JSON.stringify({ source, baudRate, httpUrl, pollSeconds, syncTime, follow }),
+            JSON.stringify({ source, baudRate, httpUrl, pollSeconds, syncTime, follow, useCompass }),
         );
     } catch {
         /* storage unavailable */
+    }
+
+    /* ---------------- reference route ---------------- */
+    const REF_KEY = 'windy-plugin-itrip-ref';
+    let refPoints: [number, number][] = [];
+    let refName = '';
+    let refLine: L.Polyline | null = null;
+
+    $: refDistance = routeLength(refPoints);
+    $: refInfo = current && refPoints.length > 1 ? routeProgress(current.lat, current.lon, refPoints) : null;
+
+    function drawRef() {
+        refLine?.remove();
+        refLine = null;
+        if (refPoints.length > 1) {
+            refLine = new L.Polyline(refPoints, {
+                color: '#00e5ff',
+                weight: 2.5,
+                opacity: 0.9,
+                dashArray: '8 6',
+            }).addTo(map);
+        }
+    }
+
+    function fitRef() {
+        if (refLine) {
+            map.fitBounds(refLine.getBounds(), { padding: 40 } as never);
+        }
+    }
+
+    function clearRef() {
+        refPoints = [];
+        refName = '';
+        refLine?.remove();
+        refLine = null;
+        try {
+            localStorage.removeItem(REF_KEY);
+        } catch {
+            /* ignore */
+        }
+    }
+
+    async function onRefFile(e: Event) {
+        const input = e.target as HTMLInputElement;
+        const file = input.files?.[0];
+        if (!file) {
+            return;
+        }
+        error = '';
+        try {
+            // Times are ignored: the route is only a visual reference
+            const pts = parseFile(file.name, await file.text());
+            if (pts.length < 2) {
+                error = 'La ruta necesita al menos 2 posiciones.';
+                return;
+            }
+            refPoints = pts.map(p => [p.lat, p.lon] as [number, number]);
+            refName = file.name.replace(/\.[^.]+$/, '');
+            drawRef();
+            fitRef();
+            try {
+                localStorage.setItem(REF_KEY, JSON.stringify({ name: refName, points: refPoints }));
+            } catch {
+                /* too big for storage: it just won't be remembered */
+            }
+        } catch (err) {
+            error = `Error leyendo la ruta: ${(err as Error).message}`;
+        } finally {
+            input.value = '';
+        }
+    }
+
+    function restoreRef() {
+        try {
+            const data = JSON.parse(localStorage.getItem(REF_KEY) || 'null');
+            if (data && Array.isArray(data.points)) {
+                refPoints = data.points;
+                refName = data.name || 'Ruta';
+                drawRef();
+            }
+        } catch {
+            /* ignore */
+        }
+    }
+
+    /* ---------------- live helpers: clock + screen ---------------- */
+    let nowTimer: ReturnType<typeof setInterval> | null = null;
+    let wakeLock: { release: () => Promise<void> } | null = null;
+
+    const setForecastNow = () => {
+        if (syncTime) {
+            store.set('timestamp', Date.now());
+        }
+    };
+
+    async function keepScreenOn() {
+        try {
+            const nav = navigator as unknown as {
+                wakeLock?: { request: (t: 'screen') => Promise<{ release: () => Promise<void> }> };
+            };
+            wakeLock = (await nav.wakeLock?.request('screen')) ?? null;
+        } catch {
+            wakeLock = null;
+        }
     }
 
     /* ---------------- state ---------------- */
@@ -481,9 +646,15 @@
     async function startLive() {
         error = '';
         stopPlay();
+        // A live session starts a fresh track (the reference route is kept)
+        clearTrack();
         liveAttitude = {};
         try {
-            if (source === 'serial') {
+            if (source === 'gps') {
+                live = await startGeolocation(useCompass, onLivePoint, msg => {
+                    error = msg;
+                });
+            } else if (source === 'serial') {
                 live = await startSerial(Number(baudRate), onLivePoint);
             } else {
                 if (!/^https?:\/\//.test(httpUrl)) {
@@ -494,10 +665,10 @@
                     error = msg;
                 });
             }
-            // Live data is "now": show current forecast
-            if (syncTime) {
-                store.set('timestamp', Date.now());
-            }
+            // Live data is "now": keep the forecast at the device's current time
+            setForecastNow();
+            nowTimer = setInterval(setForecastNow, 5 * 60 * 1000);
+            keepScreenOn();
         } catch (err) {
             error = `No se pudo conectar: ${(err as Error).message}`;
             live = null;
@@ -507,8 +678,22 @@
     async function stopLive() {
         const l = live;
         live = null;
+        if (nowTimer) {
+            clearInterval(nowTimer);
+            nowTimer = null;
+        }
+        wakeLock?.release().catch(() => {});
+        wakeLock = null;
         await l?.stop();
     }
+
+    // The screen wake lock is dropped when the tab is hidden; take it again
+    const onVisibility = () => {
+        if (live && document.visibilityState === 'visible') {
+            keepScreenOn();
+            setForecastNow();
+        }
+    };
 
     function clearTrack() {
         stopPlay();
@@ -532,14 +717,19 @@
     onMount(() => {
         bcast.on('redrawFinished', onRedraw);
         store.on('overlay', onOverlay);
+        document.addEventListener('visibilitychange', onVisibility);
+        restoreRef();
     });
 
     onDestroy(() => {
         stopPlay();
-        live?.stop();
+        stopLive();
         bcast.off('redrawFinished', onRedraw);
         store.off('overlay', onOverlay);
+        document.removeEventListener('visibilitychange', onVisibility);
         removeMapFeatures();
+        refLine?.remove();
+        refLine = null;
     });
 </script>
 
@@ -615,6 +805,20 @@
     }
     .stats {
         opacity: 0.8;
+    }
+    .hint {
+        opacity: 0.75;
+    }
+    .ref {
+        border-top: 1px solid rgba(255, 255, 255, 0.15);
+        padding-top: 8px;
+    }
+    .ref-swatch {
+        display: inline-block;
+        width: 18px;
+        border-top: 3px dashed #00e5ff;
+        vertical-align: middle;
+        margin-right: 4px;
     }
     .disabled {
         opacity: 0.4;

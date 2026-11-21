@@ -9,7 +9,10 @@ sobre la **capa de viento** de Windy:
 - Panel con rumbo, SOG, COG, escora, cabeceo, **TWS, TWD, TWA** (babor/estribor) y el rumbo respecto al viento
   (ceñida, través, largo…).
 - Reproducción del track con barra de tiempo. Si los puntos tienen hora, **la hora del pronóstico de Windy se sincroniza** con la del track.
-- Datos **en vivo**:
+- **Ruta de referencia**: carga un GPX (con o sin horas) como línea discontinua azul. No cambia la hora del
+  pronóstico, se recuerda entre sesiones y muestra el desvío respecto a la ruta y las millas que faltan.
+- Datos **en vivo** (el pronóstico se mantiene en la hora actual del dispositivo y la pantalla no se apaga):
+  - **GPS tablet**: GPS del propio dispositivo (posición, SOG, COG) y, opcionalmente, su brújula como rumbo.
   - **USB** (Web Serial, Chrome/Edge de escritorio): conecta la caja al ordenador.
   - **Wi‑Fi / URL**: lee periódicamente una URL que devuelva el último punto (p. ej. un ESP32 en la caja o un servidor intermedio).
 

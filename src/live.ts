@@ -85,6 +85,93 @@ export const startSerial = async (baudRate: number, onPoint: LiveCallback): Prom
 };
 
 /* ------------------------------------------------------------------ */
+/* GPS (and optionally compass) of the tablet / phone running Windy */
+
+export const isGeolocationSupported = (): boolean => 'geolocation' in navigator;
+
+type OrientationEventIOS = DeviceOrientationEvent & { webkitCompassHeading?: number };
+type OrientationCtorIOS = typeof DeviceOrientationEvent & {
+    requestPermission?: () => Promise<'granted' | 'denied'>;
+};
+
+/**
+ * Uses the device's own GPS. Position fixes give lat/lon/SOG/COG.
+ * If `useCompass` is set, the device compass is used as heading (the tablet
+ * must be mounted aligned with the bow); otherwise heading falls back to COG.
+ * Must be called from a user gesture (iOS asks for compass permission).
+ */
+export const startGeolocation = async (
+    useCompass: boolean,
+    onPoint: LiveCallback,
+    onError: (msg: string) => void,
+): Promise<LiveSource> => {
+    let removeCompass = () => {};
+
+    if (useCompass) {
+        const Ctor = (window as unknown as { DeviceOrientationEvent?: OrientationCtorIOS })
+            .DeviceOrientationEvent;
+        if (Ctor?.requestPermission) {
+            const res = await Ctor.requestPermission().catch(() => 'denied');
+            if (res !== 'granted') {
+                onError('Permiso de brújula denegado: se usará el rumbo del GPS (COG).');
+            }
+        }
+        const eventName =
+            'ondeviceorientationabsolute' in window
+                ? 'deviceorientationabsolute'
+                : 'deviceorientation';
+        let lastEmit = 0;
+        const handler = (ev: Event) => {
+            const e = ev as OrientationEventIOS;
+            let h: number | undefined;
+            if (typeof e.webkitCompassHeading === 'number') {
+                h = e.webkitCompassHeading; // iOS, already compensated
+            } else if (e.alpha !== null && (e.absolute || eventName === 'deviceorientationabsolute')) {
+                h = 360 - e.alpha + (screen.orientation?.angle ?? 0);
+            }
+            const now = Date.now();
+            if (h === undefined || now - lastEmit < 250) {
+                return;
+            }
+            lastEmit = now;
+            onPoint({ heading: ((h % 360) + 360) % 360 }, false);
+        };
+        window.addEventListener(eventName, handler);
+        removeCompass = () => window.removeEventListener(eventName, handler);
+    }
+
+    const watchId = navigator.geolocation.watchPosition(
+        pos => {
+            const { latitude, longitude, speed, heading } = pos.coords;
+            const p: PartialPoint = { lat: latitude, lon: longitude, t: pos.timestamp };
+            if (speed !== null && Number.isFinite(speed)) {
+                p.sog = speed * 1.943844;
+            }
+            if (heading !== null && Number.isFinite(heading) && (speed ?? 0) > 0.3) {
+                p.cog = heading;
+            }
+            onPoint(p, true);
+            onError('');
+        },
+        err => {
+            onError(
+                err.code === err.PERMISSION_DENIED
+                    ? 'Permiso de ubicación denegado. Actívalo para windy.com en el navegador.'
+                    : `GPS: ${err.message}`,
+            );
+        },
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 },
+    );
+
+    return {
+        stop: async () => {
+            navigator.geolocation.clearWatch(watchId);
+            removeCompass();
+        },
+    };
+};
+
+/* ------------------------------------------------------------------ */
 /* HTTP polling (e.g. ESP32/ESP8266 web server in the box, or a cloud relay) */
 
 /**
