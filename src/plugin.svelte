@@ -34,7 +34,7 @@
     {#if source === 'file'}
         <label class="button button--variant-orange size-s mb-10 file-btn">
             Cargar track (GPX, CSV, NMEA, JSON)
-            <input type="file" accept=".gpx,.csv,.txt,.nmea,.log,.json,.geojson" on:change={onFile} />
+            <input type="file" on:change={onFile} />
         </label>
     {:else if source === 'gps'}
         {#if !geoSupported}
@@ -198,12 +198,18 @@
         {:else}
             <label class="button size-xs file-btn">
                 Cargar ruta (GPX, CSV, NMEA, JSON)
-                <input
-                    type="file"
-                    accept=".gpx,.csv,.txt,.nmea,.log,.json,.geojson"
-                    on:change={onRefFile}
-                />
+                <input type="file" on:change={onRefFile} />
             </label>
+            <div class="size-xs hint mt-5 mb-5">o pega un enlace al archivo:</div>
+            <div class="row">
+                <input
+                    class="url-input"
+                    type="text"
+                    placeholder="https://…/ruta.gpx"
+                    bind:value={refUrl}
+                />
+                <div class="button size-xs" on:click={loadRefUrl}>Cargar</div>
+            </div>
         {/if}
     </div>
 </section>
@@ -314,6 +320,26 @@
         }
     }
 
+    let refUrl = '';
+
+    function setRef(name: string, text: string) {
+        // Times are ignored: the route is only a visual reference
+        const pts = parseFile(name, text);
+        if (pts.length < 2) {
+            error = 'La ruta necesita al menos 2 posiciones.';
+            return;
+        }
+        refPoints = pts.map(p => [p.lat, p.lon] as [number, number]);
+        refName = decodeURIComponent(name.split('/').pop() || 'Ruta').replace(/\.[^.]+$/, '');
+        drawRef();
+        fitRef();
+        try {
+            localStorage.setItem(REF_KEY, JSON.stringify({ name: refName, points: refPoints }));
+        } catch {
+            /* too big for storage: it just won't be remembered */
+        }
+    }
+
     async function onRefFile(e: Event) {
         const input = e.target as HTMLInputElement;
         const file = input.files?.[0];
@@ -322,25 +348,29 @@
         }
         error = '';
         try {
-            // Times are ignored: the route is only a visual reference
-            const pts = parseFile(file.name, await file.text());
-            if (pts.length < 2) {
-                error = 'La ruta necesita al menos 2 posiciones.';
-                return;
-            }
-            refPoints = pts.map(p => [p.lat, p.lon] as [number, number]);
-            refName = file.name.replace(/\.[^.]+$/, '');
-            drawRef();
-            fitRef();
-            try {
-                localStorage.setItem(REF_KEY, JSON.stringify({ name: refName, points: refPoints }));
-            } catch {
-                /* too big for storage: it just won't be remembered */
-            }
+            setRef(file.name, await file.text());
         } catch (err) {
             error = `Error leyendo la ruta: ${(err as Error).message}`;
         } finally {
             input.value = '';
+        }
+    }
+
+    async function loadRefUrl() {
+        error = '';
+        const url = refUrl.trim();
+        if (!/^https:\/\//.test(url)) {
+            error = 'El enlace debe empezar por https://';
+            return;
+        }
+        try {
+            const res = await fetch(url);
+            if (!res.ok) {
+                throw new Error(`HTTP ${res.status}`);
+            }
+            setRef(url.split('?')[0], await res.text());
+        } catch (err) {
+            error = `No se pudo descargar la ruta: ${(err as Error).message}`;
         }
     }
 
@@ -756,8 +786,13 @@
     .file-btn {
         display: block;
         text-align: center;
+        position: relative;
+        overflow: hidden;
         input {
-            display: none;
+            position: absolute;
+            inset: 0;
+            opacity: 0;
+            cursor: pointer;
         }
     }
     .row {
