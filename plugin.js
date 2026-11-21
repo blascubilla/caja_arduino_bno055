@@ -11,8 +11,8 @@ const __pluginConfig =  {
   "desktopWidth": 260,
   "routerPath": "/itrip",
   "private": true,
-  "built": 1795233858689,
-  "builtReadable": "2026-11-21T04:04:18.689Z"
+  "built": 1795234666441,
+  "builtReadable": "2026-11-21T04:17:46.441Z"
 };
 
 // transformCode: import bcast from '@windy/broadcast';
@@ -1284,6 +1284,56 @@ const toRad = (d)=>d * Math.PI / 180;
     const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
     return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
 };
+/**
+ * Position relative to a reference route (list of [lat, lon]).
+ * Uses a local flat projection, accurate enough for a few hundred NM.
+ * @returns xte: distance to the route (NM), remaining: distance along the
+ *          route from the closest point to its end (NM)
+ */ const routeProgress = (lat, lon, route)=>{
+    if (route.length < 2) {
+        return null;
+    }
+    const kx = 60 * Math.cos(toRad(lat)); // NM per degree of longitude
+    const ky = 60;
+    let best = Infinity;
+    let bestIdx = 0;
+    let bestT = 0;
+    for(let i = 0; i < route.length - 1; i++){
+        const ax = (route[i][1] - lon) * kx;
+        const ay = (route[i][0] - lat) * ky;
+        const bx = (route[i + 1][1] - lon) * kx;
+        const by = (route[i + 1][0] - lat) * ky;
+        const dx = bx - ax;
+        const dy = by - ay;
+        const len2 = dx * dx + dy * dy;
+        const t = len2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2)) : 0;
+        const px = ax + t * dx;
+        const py = ay + t * dy;
+        const d = Math.hypot(px, py);
+        if (d < best) {
+            best = d;
+            bestIdx = i;
+            bestT = t;
+        }
+    }
+    const [aLat, aLon] = route[bestIdx];
+    const [bLat, bLon] = route[bestIdx + 1];
+    let remaining = (1 - bestT) * distanceNm(aLat, aLon, bLat, bLon);
+    for(let i = bestIdx + 1; i < route.length - 1; i++){
+        remaining += distanceNm(route[i][0], route[i][1], route[i + 1][0], route[i + 1][1]);
+    }
+    return {
+        xte: best,
+        remaining
+    };
+};
+/** Total length of a route in NM */ const routeLength = (route)=>{
+    let d = 0;
+    for(let i = 1; i < route.length; i++){
+        d += distanceNm(route[i - 1][0], route[i - 1][1], route[i][0], route[i][1]);
+    }
+    return d;
+};
 /** Initial bearing from point 1 to point 2, degrees */ const bearing = (lat1, lon1, lat2, lon2)=>{
     const y = Math.sin(toRad(lon2 - lon1)) * Math.cos(toRad(lat2));
     const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) - Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(toRad(lon2 - lon1));
@@ -1393,6 +1443,73 @@ const isSerialSupported = ()=>'serial' in navigator;
         }
     };
 };
+/* ------------------------------------------------------------------ */ /* GPS (and optionally compass) of the tablet / phone running Windy */ const isGeolocationSupported = ()=>'geolocation' in navigator;
+/**
+ * Uses the device's own GPS. Position fixes give lat/lon/SOG/COG.
+ * If `useCompass` is set, the device compass is used as heading (the tablet
+ * must be mounted aligned with the bow); otherwise heading falls back to COG.
+ * Must be called from a user gesture (iOS asks for compass permission).
+ */ const startGeolocation = async (useCompass, onPoint, onError)=>{
+    let removeCompass = ()=>{};
+    if (useCompass) {
+        const Ctor = window.DeviceOrientationEvent;
+        if (Ctor?.requestPermission) {
+            const res = await Ctor.requestPermission().catch(()=>'denied');
+            if (res !== 'granted') {
+                onError('Permiso de brújula denegado: se usará el rumbo del GPS (COG).');
+            }
+        }
+        const eventName = 'ondeviceorientationabsolute' in window ? 'deviceorientationabsolute' : 'deviceorientation';
+        let lastEmit = 0;
+        const handler = (ev)=>{
+            const e = ev;
+            let h;
+            if (typeof e.webkitCompassHeading === 'number') {
+                h = e.webkitCompassHeading; // iOS, already compensated
+            } else if (e.alpha !== null && (e.absolute || eventName === 'deviceorientationabsolute')) {
+                h = 360 - e.alpha + (screen.orientation?.angle ?? 0);
+            }
+            const now = Date.now();
+            if (h === undefined || now - lastEmit < 250) {
+                return;
+            }
+            lastEmit = now;
+            onPoint({
+                heading: (h % 360 + 360) % 360
+            }, false);
+        };
+        window.addEventListener(eventName, handler);
+        removeCompass = ()=>window.removeEventListener(eventName, handler);
+    }
+    const watchId = navigator.geolocation.watchPosition((pos)=>{
+        const { latitude, longitude, speed, heading } = pos.coords;
+        const p = {
+            lat: latitude,
+            lon: longitude,
+            t: pos.timestamp
+        };
+        if (speed !== null && Number.isFinite(speed)) {
+            p.sog = speed * 1.943844;
+        }
+        if (heading !== null && Number.isFinite(heading) && (speed ?? 0) > 0.3) {
+            p.cog = heading;
+        }
+        onPoint(p, true);
+        onError('');
+    }, (err)=>{
+        onError(err.code === err.PERMISSION_DENIED ? 'Permiso de ubicación denegado. Actívalo para windy.com en el navegador.' : `GPS: ${err.message}`);
+    }, {
+        enableHighAccuracy: true,
+        maximumAge: 0,
+        timeout: 30000
+    });
+    return {
+        stop: async ()=>{
+            navigator.geolocation.clearWatch(watchId);
+            removeCompass();
+        }
+    };
+};
 /* ------------------------------------------------------------------ */ /* HTTP polling (e.g. ESP32/ESP8266 web server in the box, or a cloud relay) */ /**
  * Polls `url` every `intervalMs`. The response can be:
  *  - a JSON object with the latest point  {lat, lon, heading, sog, pitch, roll, time}
@@ -1456,23 +1573,23 @@ const isSerialSupported = ()=>'serial' in navigator;
 /* src/plugin.svelte generated by Svelte v4.2.20 */
 
 function add_css(target) {
-	append_styles(target, "svelte-1221t5r", ".itrip.svelte-1221t5r.svelte-1221t5r{padding-top:5px}.tabs.svelte-1221t5r.svelte-1221t5r{display:flex;gap:4px}.tabs.svelte-1221t5r .tab.svelte-1221t5r{flex:1;text-align:center;padding:5px 0;border-radius:4px;background:rgba(255, 255, 255, 0.08);font-size:12px}.tabs.svelte-1221t5r .tab.active.svelte-1221t5r{background:#ff2d6f;color:#fff}.file-btn.svelte-1221t5r.svelte-1221t5r{display:block;text-align:center}.file-btn.svelte-1221t5r input.svelte-1221t5r{display:none}.row.svelte-1221t5r.svelte-1221t5r{display:flex;align-items:center;justify-content:space-between;gap:8px}.url-input.svelte-1221t5r.svelte-1221t5r{width:100%;box-sizing:border-box;padding:5px}.card.svelte-1221t5r.svelte-1221t5r{padding:8px;border-radius:6px;background:rgba(255, 255, 255, 0.06)}.card.wind.svelte-1221t5r.svelte-1221t5r{border-left:4px solid #ffd400}.grid.svelte-1221t5r.svelte-1221t5r{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;font-size:14px}.lbl.svelte-1221t5r.svelte-1221t5r{display:block;font-size:10px;opacity:0.6;text-transform:uppercase}.slider.svelte-1221t5r.svelte-1221t5r{width:100%}.check.svelte-1221t5r.svelte-1221t5r{display:flex;align-items:center;gap:6px;margin-bottom:4px}.warn.svelte-1221t5r.svelte-1221t5r{color:#ffb347}.stats.svelte-1221t5r.svelte-1221t5r{opacity:0.8}.disabled.svelte-1221t5r.svelte-1221t5r{opacity:0.4;pointer-events:none}");
+	append_styles(target, "svelte-9uit39", ".itrip.svelte-9uit39.svelte-9uit39{padding-top:5px}.tabs.svelte-9uit39.svelte-9uit39{display:flex;gap:4px}.tabs.svelte-9uit39 .tab.svelte-9uit39{flex:1;text-align:center;padding:5px 0;border-radius:4px;background:rgba(255, 255, 255, 0.08);font-size:12px}.tabs.svelte-9uit39 .tab.active.svelte-9uit39{background:#ff2d6f;color:#fff}.file-btn.svelte-9uit39.svelte-9uit39{display:block;text-align:center}.file-btn.svelte-9uit39 input.svelte-9uit39{display:none}.row.svelte-9uit39.svelte-9uit39{display:flex;align-items:center;justify-content:space-between;gap:8px}.url-input.svelte-9uit39.svelte-9uit39{width:100%;box-sizing:border-box;padding:5px}.card.svelte-9uit39.svelte-9uit39{padding:8px;border-radius:6px;background:rgba(255, 255, 255, 0.06)}.card.wind.svelte-9uit39.svelte-9uit39{border-left:4px solid #ffd400}.grid.svelte-9uit39.svelte-9uit39{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;font-size:14px}.lbl.svelte-9uit39.svelte-9uit39{display:block;font-size:10px;opacity:0.6;text-transform:uppercase}.slider.svelte-9uit39.svelte-9uit39{width:100%}.check.svelte-9uit39.svelte-9uit39{display:flex;align-items:center;gap:6px;margin-bottom:4px}.warn.svelte-9uit39.svelte-9uit39{color:#ffb347}.stats.svelte-9uit39.svelte-9uit39{opacity:0.8}.hint.svelte-9uit39.svelte-9uit39{opacity:0.75}.ref.svelte-9uit39.svelte-9uit39{border-top:1px solid rgba(255, 255, 255, 0.15);padding-top:8px}.ref-swatch.svelte-9uit39.svelte-9uit39{display:inline-block;width:18px;border-top:3px dashed #00e5ff;vertical-align:middle;margin-right:4px}.disabled.svelte-9uit39.svelte-9uit39{opacity:0.4;pointer-events:none}");
 }
 
 function get_each_context_1(ctx, list, i) {
 	const child_ctx = ctx.slice();
-	child_ctx[64] = list[i];
+	child_ctx[83] = list[i];
 	return child_ctx;
 }
 
 function get_each_context(ctx, list, i) {
 	const child_ctx = ctx.slice();
-	child_ctx[61] = list[i];
+	child_ctx[80] = list[i];
 	return child_ctx;
 }
 
 // (5:4) {#if !isMobileOrTablet}
-function create_if_block_13(ctx) {
+function create_if_block_17(ctx) {
 	let div;
 	let mounted;
 	let dispose;
@@ -1480,14 +1597,14 @@ function create_if_block_13(ctx) {
 	return {
 		c() {
 			div = element("div");
-			div.textContent = `${/*title*/ ctx[15]}`;
+			div.textContent = `${/*title*/ ctx[20]}`;
 			attr(div, "class", "plugin__title plugin__title--chevron-back");
 		},
 		m(target, anchor) {
 			insert(target, div, anchor);
 
 			if (!mounted) {
-				dispose = listen(div, "click", /*click_handler*/ ctx[28]);
+				dispose = listen(div, "click", /*click_handler*/ ctx[37]);
 				mounted = true;
 			}
 		},
@@ -1503,8 +1620,8 @@ function create_if_block_13(ctx) {
 	};
 }
 
-// (51:4) {:else}
-function create_else_block_3(ctx) {
+// (66:4) {:else}
+function create_else_block_5(ctx) {
 	let input;
 	let input_disabled_value;
 	let t0;
@@ -1536,14 +1653,14 @@ function create_else_block_3(ctx) {
 				each_blocks[i].c();
 			}
 
-			attr(input, "class", "url-input mb-5 svelte-1221t5r");
+			attr(input, "class", "url-input mb-5 svelte-9uit39");
 			attr(input, "type", "text");
 			attr(input, "placeholder", "https://mi-itrip.local/data.json");
-			input.disabled = input_disabled_value = !!/*live*/ ctx[9];
+			input.disabled = input_disabled_value = !!/*live*/ ctx[12];
 			attr(span, "class", "size-xs");
-			select.disabled = select_disabled_value = !!/*live*/ ctx[9];
-			if (/*pollSeconds*/ ctx[3] === void 0) add_render_callback(() => /*select_change_handler_1*/ ctx[34].call(select));
-			attr(div, "class", "row mb-10 svelte-1221t5r");
+			select.disabled = select_disabled_value = !!/*live*/ ctx[12];
+			if (/*pollSeconds*/ ctx[3] === void 0) add_render_callback(() => /*select_change_handler_1*/ ctx[45].call(select));
+			attr(div, "class", "row mb-10 svelte-9uit39");
 		},
 		m(target, anchor) {
 			insert(target, input, anchor);
@@ -1564,15 +1681,15 @@ function create_else_block_3(ctx) {
 
 			if (!mounted) {
 				dispose = [
-					listen(input, "input", /*input_input_handler*/ ctx[33]),
-					listen(select, "change", /*select_change_handler_1*/ ctx[34])
+					listen(input, "input", /*input_input_handler*/ ctx[44]),
+					listen(select, "change", /*select_change_handler_1*/ ctx[45])
 				];
 
 				mounted = true;
 			}
 		},
 		p(ctx, dirty) {
-			if (dirty[0] & /*live*/ 512 && input_disabled_value !== (input_disabled_value = !!/*live*/ ctx[9])) {
+			if (dirty[0] & /*live*/ 4096 && input_disabled_value !== (input_disabled_value = !!/*live*/ ctx[12])) {
 				input.disabled = input_disabled_value;
 			}
 
@@ -1580,7 +1697,7 @@ function create_else_block_3(ctx) {
 				set_input_value(input, /*httpUrl*/ ctx[2]);
 			}
 
-			if (dirty[0] & /*live*/ 512 && select_disabled_value !== (select_disabled_value = !!/*live*/ ctx[9])) {
+			if (dirty[0] & /*live*/ 4096 && select_disabled_value !== (select_disabled_value = !!/*live*/ ctx[12])) {
 				select.disabled = select_disabled_value;
 			}
 
@@ -1602,13 +1719,47 @@ function create_else_block_3(ctx) {
 	};
 }
 
-// (36:34) 
-function create_if_block_11(ctx) {
+// (51:34) 
+function create_if_block_15(ctx) {
+	let if_block_anchor;
+
+	function select_block_type_2(ctx, dirty) {
+		if (!/*serialSupported*/ ctx[21]) return create_if_block_16;
+		return create_else_block_4;
+	}
+
+	let current_block_type = select_block_type_2(ctx);
+	let if_block = current_block_type(ctx);
+
+	return {
+		c() {
+			if_block.c();
+			if_block_anchor = empty();
+		},
+		m(target, anchor) {
+			if_block.m(target, anchor);
+			insert(target, if_block_anchor, anchor);
+		},
+		p(ctx, dirty) {
+			if_block.p(ctx, dirty);
+		},
+		d(detaching) {
+			if (detaching) {
+				detach(if_block_anchor);
+			}
+
+			if_block.d(detaching);
+		}
+	};
+}
+
+// (39:31) 
+function create_if_block_13(ctx) {
 	let if_block_anchor;
 
 	function select_block_type_1(ctx, dirty) {
-		if (!/*serialSupported*/ ctx[16]) return create_if_block_12;
-		return create_else_block_2;
+		if (!/*geoSupported*/ ctx[22]) return create_if_block_14;
+		return create_else_block_3;
 	}
 
 	let current_block_type = select_block_type_1(ctx);
@@ -1636,8 +1787,8 @@ function create_if_block_11(ctx) {
 	};
 }
 
-// (31:4) {#if source === 'file'}
-function create_if_block_10(ctx) {
+// (34:4) {#if source === 'file'}
+function create_if_block_12(ctx) {
 	let label;
 	let t;
 	let input;
@@ -1651,8 +1802,8 @@ function create_if_block_10(ctx) {
 			input = element("input");
 			attr(input, "type", "file");
 			attr(input, "accept", ".gpx,.csv,.txt,.nmea,.log,.json,.geojson");
-			attr(input, "class", "svelte-1221t5r");
-			attr(label, "class", "button button--variant-orange size-s mb-10 file-btn svelte-1221t5r");
+			attr(input, "class", "svelte-9uit39");
+			attr(label, "class", "button button--variant-orange size-s mb-10 file-btn svelte-9uit39");
 		},
 		m(target, anchor) {
 			insert(target, label, anchor);
@@ -1660,7 +1811,7 @@ function create_if_block_10(ctx) {
 			append(label, input);
 
 			if (!mounted) {
-				dispose = listen(input, "change", /*onFile*/ ctx[23]);
+				dispose = listen(input, "change", /*onFile*/ ctx[32]);
 				mounted = true;
 			}
 		},
@@ -1676,15 +1827,15 @@ function create_if_block_10(ctx) {
 	};
 }
 
-// (62:16) {#each [1, 2, 5, 10, 30, 60] as s}
+// (77:16) {#each [1, 2, 5, 10, 30, 60] as s}
 function create_each_block_1(ctx) {
 	let option;
 
 	return {
 		c() {
 			option = element("option");
-			option.textContent = `${/*s*/ ctx[64]} s`;
-			option.__value = /*s*/ ctx[64];
+			option.textContent = `${/*s*/ ctx[83]} s`;
+			option.__value = /*s*/ ctx[83];
 			set_input_value(option, option.__value);
 		},
 		m(target, anchor) {
@@ -1699,8 +1850,8 @@ function create_each_block_1(ctx) {
 	};
 }
 
-// (41:8) {:else}
-function create_else_block_2(ctx) {
+// (56:8) {:else}
+function create_else_block_4(ctx) {
 	let div;
 	let span;
 	let t1;
@@ -1728,9 +1879,9 @@ function create_else_block_2(ctx) {
 			}
 
 			attr(span, "class", "size-xs");
-			select.disabled = select_disabled_value = !!/*live*/ ctx[9];
-			if (/*baudRate*/ ctx[1] === void 0) add_render_callback(() => /*select_change_handler*/ ctx[32].call(select));
-			attr(div, "class", "row mb-10 svelte-1221t5r");
+			select.disabled = select_disabled_value = !!/*live*/ ctx[12];
+			if (/*baudRate*/ ctx[1] === void 0) add_render_callback(() => /*select_change_handler*/ ctx[43].call(select));
+			attr(div, "class", "row mb-10 svelte-9uit39");
 		},
 		m(target, anchor) {
 			insert(target, div, anchor);
@@ -1747,12 +1898,12 @@ function create_else_block_2(ctx) {
 			select_option(select, /*baudRate*/ ctx[1], true);
 
 			if (!mounted) {
-				dispose = listen(select, "change", /*select_change_handler*/ ctx[32]);
+				dispose = listen(select, "change", /*select_change_handler*/ ctx[43]);
 				mounted = true;
 			}
 		},
 		p(ctx, dirty) {
-			if (dirty[0] & /*live*/ 512 && select_disabled_value !== (select_disabled_value = !!/*live*/ ctx[9])) {
+			if (dirty[0] & /*live*/ 4096 && select_disabled_value !== (select_disabled_value = !!/*live*/ ctx[12])) {
 				select.disabled = select_disabled_value;
 			}
 
@@ -1772,15 +1923,15 @@ function create_else_block_2(ctx) {
 	};
 }
 
-// (37:8) {#if !serialSupported}
-function create_if_block_12(ctx) {
+// (52:8) {#if !serialSupported}
+function create_if_block_16(ctx) {
 	let p;
 
 	return {
 		c() {
 			p = element("p");
 			p.textContent = "Tu navegador no soporta Web Serial. Usa Chrome o Edge de escritorio.";
-			attr(p, "class", "size-xs warn svelte-1221t5r");
+			attr(p, "class", "size-xs warn svelte-9uit39");
 		},
 		m(target, anchor) {
 			insert(target, p, anchor);
@@ -1794,15 +1945,15 @@ function create_if_block_12(ctx) {
 	};
 }
 
-// (45:20) {#each [4800, 9600, 19200, 38400, 57600, 115200] as b}
+// (60:20) {#each [4800, 9600, 19200, 38400, 57600, 115200] as b}
 function create_each_block(ctx) {
 	let option;
 
 	return {
 		c() {
 			option = element("option");
-			option.textContent = `${/*b*/ ctx[61]}`;
-			option.__value = /*b*/ ctx[61];
+			option.textContent = `${/*b*/ ctx[80]}`;
+			option.__value = /*b*/ ctx[80];
 			set_input_value(option, option.__value);
 		},
 		m(target, anchor) {
@@ -1817,16 +1968,97 @@ function create_each_block(ctx) {
 	};
 }
 
-// (69:4) {#if source !== 'file'}
-function create_if_block_8(ctx) {
+// (42:8) {:else}
+function create_else_block_3(ctx) {
+	let p;
+	let t1;
+	let label;
+	let input;
+	let input_disabled_value;
+	let t2;
+	let mounted;
+	let dispose;
+
+	return {
+		c() {
+			p = element("p");
+			p.textContent = "Usa el GPS de este dispositivo. El pronóstico se mantiene en la hora actual.";
+			t1 = space();
+			label = element("label");
+			input = element("input");
+			t2 = text("\n                Rumbo con la brújula (tablet alineada con la proa)");
+			attr(p, "class", "size-xs mb-5 hint svelte-9uit39");
+			attr(input, "type", "checkbox");
+			input.disabled = input_disabled_value = !!/*live*/ ctx[12];
+			attr(label, "class", "size-xs check mb-10 svelte-9uit39");
+		},
+		m(target, anchor) {
+			insert(target, p, anchor);
+			insert(target, t1, anchor);
+			insert(target, label, anchor);
+			append(label, input);
+			input.checked = /*useCompass*/ ctx[6];
+			append(label, t2);
+
+			if (!mounted) {
+				dispose = listen(input, "change", /*input_change_handler*/ ctx[42]);
+				mounted = true;
+			}
+		},
+		p(ctx, dirty) {
+			if (dirty[0] & /*live*/ 4096 && input_disabled_value !== (input_disabled_value = !!/*live*/ ctx[12])) {
+				input.disabled = input_disabled_value;
+			}
+
+			if (dirty[0] & /*useCompass*/ 64) {
+				input.checked = /*useCompass*/ ctx[6];
+			}
+		},
+		d(detaching) {
+			if (detaching) {
+				detach(p);
+				detach(t1);
+				detach(label);
+			}
+
+			mounted = false;
+			dispose();
+		}
+	};
+}
+
+// (40:8) {#if !geoSupported}
+function create_if_block_14(ctx) {
+	let p;
+
+	return {
+		c() {
+			p = element("p");
+			p.textContent = "Este navegador no tiene acceso al GPS.";
+			attr(p, "class", "size-xs warn svelte-9uit39");
+		},
+		m(target, anchor) {
+			insert(target, p, anchor);
+		},
+		p: noop,
+		d(detaching) {
+			if (detaching) {
+				detach(p);
+			}
+		}
+	};
+}
+
+// (84:4) {#if source !== 'file'}
+function create_if_block_10(ctx) {
 	let if_block_anchor;
 
-	function select_block_type_2(ctx, dirty) {
-		if (/*live*/ ctx[9]) return create_if_block_9;
-		return create_else_block_1;
+	function select_block_type_3(ctx, dirty) {
+		if (/*live*/ ctx[12]) return create_if_block_11;
+		return create_else_block_2;
 	}
 
-	let current_block_type = select_block_type_2(ctx);
+	let current_block_type = select_block_type_3(ctx);
 	let if_block = current_block_type(ctx);
 
 	return {
@@ -1839,7 +2071,7 @@ function create_if_block_8(ctx) {
 			insert(target, if_block_anchor, anchor);
 		},
 		p(ctx, dirty) {
-			if (current_block_type === (current_block_type = select_block_type_2(ctx)) && if_block) {
+			if (current_block_type === (current_block_type = select_block_type_3(ctx)) && if_block) {
 				if_block.p(ctx, dirty);
 			} else {
 				if_block.d(1);
@@ -1861,8 +2093,8 @@ function create_if_block_8(ctx) {
 	};
 }
 
-// (74:8) {:else}
-function create_else_block_1(ctx) {
+// (89:8) {:else}
+function create_else_block_2(ctx) {
 	let div;
 	let mounted;
 	let dispose;
@@ -1871,20 +2103,20 @@ function create_else_block_1(ctx) {
 		c() {
 			div = element("div");
 			div.textContent = "● Conectar en vivo";
-			attr(div, "class", "button button--variant-orange size-s mb-10 svelte-1221t5r");
-			toggle_class(div, "disabled", /*source*/ ctx[0] === 'serial' && !/*serialSupported*/ ctx[16]);
+			attr(div, "class", "button button--variant-orange size-s mb-10 svelte-9uit39");
+			toggle_class(div, "disabled", /*source*/ ctx[0] === 'serial' && !/*serialSupported*/ ctx[21] || /*source*/ ctx[0] === 'gps' && !/*geoSupported*/ ctx[22]);
 		},
 		m(target, anchor) {
 			insert(target, div, anchor);
 
 			if (!mounted) {
-				dispose = listen(div, "click", /*startLive*/ ctx[24]);
+				dispose = listen(div, "click", /*startLive*/ ctx[33]);
 				mounted = true;
 			}
 		},
 		p(ctx, dirty) {
-			if (dirty[0] & /*source, serialSupported*/ 65537) {
-				toggle_class(div, "disabled", /*source*/ ctx[0] === 'serial' && !/*serialSupported*/ ctx[16]);
+			if (dirty[0] & /*source, serialSupported, geoSupported*/ 6291457) {
+				toggle_class(div, "disabled", /*source*/ ctx[0] === 'serial' && !/*serialSupported*/ ctx[21] || /*source*/ ctx[0] === 'gps' && !/*geoSupported*/ ctx[22]);
 			}
 		},
 		d(detaching) {
@@ -1898,8 +2130,8 @@ function create_else_block_1(ctx) {
 	};
 }
 
-// (70:8) {#if live}
-function create_if_block_9(ctx) {
+// (85:8) {#if live}
+function create_if_block_11(ctx) {
 	let div;
 	let mounted;
 	let dispose;
@@ -1914,7 +2146,7 @@ function create_if_block_9(ctx) {
 			insert(target, div, anchor);
 
 			if (!mounted) {
-				dispose = listen(div, "click", /*stopLive*/ ctx[25]);
+				dispose = listen(div, "click", /*stopLive*/ ctx[34]);
 				mounted = true;
 			}
 		},
@@ -1930,23 +2162,23 @@ function create_if_block_9(ctx) {
 	};
 }
 
-// (85:4) {#if error}
-function create_if_block_7(ctx) {
+// (101:4) {#if error}
+function create_if_block_9(ctx) {
 	let p;
 	let t;
 
 	return {
 		c() {
 			p = element("p");
-			t = text(/*error*/ ctx[10]);
-			attr(p, "class", "size-xs warn mb-10 svelte-1221t5r");
+			t = text(/*error*/ ctx[13]);
+			attr(p, "class", "size-xs warn mb-10 svelte-9uit39");
 		},
 		m(target, anchor) {
 			insert(target, p, anchor);
 			append(p, t);
 		},
 		p(ctx, dirty) {
-			if (dirty[0] & /*error*/ 1024) set_data(t, /*error*/ ctx[10]);
+			if (dirty[0] & /*error*/ 8192) set_data(t, /*error*/ ctx[13]);
 		},
 		d(detaching) {
 			if (detaching) {
@@ -1956,55 +2188,55 @@ function create_if_block_7(ctx) {
 	};
 }
 
-// (89:4) {#if current}
-function create_if_block_4(ctx) {
+// (105:4) {#if current}
+function create_if_block_6(ctx) {
 	let div7;
 	let div6;
 	let div0;
 	let span0;
-	let t1_value = /*fmtDeg*/ ctx[18](/*current*/ ctx[8].heading) + "";
+	let t1_value = /*fmtDeg*/ ctx[27](/*current*/ ctx[10].heading) + "";
 	let t1;
 	let t2;
 	let div1;
 	let span1;
-	let t4_value = /*fmt*/ ctx[17](/*current*/ ctx[8].sog, 1) + "";
+	let t4_value = /*fmt*/ ctx[26](/*current*/ ctx[10].sog, 1) + "";
 	let t4;
 	let t5;
 	let t6;
 	let div2;
 	let span2;
-	let t8_value = /*fmtDeg*/ ctx[18](/*current*/ ctx[8].cog) + "";
+	let t8_value = /*fmtDeg*/ ctx[27](/*current*/ ctx[10].cog) + "";
 	let t8;
 	let t9;
 	let div3;
 	let span3;
-	let t11_value = /*fmt*/ ctx[17](/*current*/ ctx[8].roll, 0) + "";
+	let t11_value = /*fmt*/ ctx[26](/*current*/ ctx[10].roll, 0) + "";
 	let t11;
 	let t12;
 	let t13;
 	let div4;
 	let span4;
-	let t15_value = /*fmt*/ ctx[17](/*current*/ ctx[8].pitch, 0) + "";
+	let t15_value = /*fmt*/ ctx[26](/*current*/ ctx[10].pitch, 0) + "";
 	let t15;
 	let t16;
 	let t17;
 	let div5;
 	let span5;
 
-	let t19_value = (/*current*/ ctx[8].t
-	? new Date(/*current*/ ctx[8].t).toLocaleTimeString()
+	let t19_value = (/*current*/ ctx[10].t
+	? new Date(/*current*/ ctx[10].t).toLocaleTimeString()
 	: '—') + "";
 
 	let t19;
 	let t20;
 	let div8;
 
-	function select_block_type_3(ctx, dirty) {
-		if (/*windInfo*/ ctx[12]) return create_if_block_5;
-		return create_else_block;
+	function select_block_type_4(ctx, dirty) {
+		if (/*windInfo*/ ctx[15]) return create_if_block_7;
+		return create_else_block_1;
 	}
 
-	let current_block_type = select_block_type_3(ctx);
+	let current_block_type = select_block_type_4(ctx);
 	let if_block = current_block_type(ctx);
 
 	return {
@@ -2046,15 +2278,15 @@ function create_if_block_4(ctx) {
 			t20 = space();
 			div8 = element("div");
 			if_block.c();
-			attr(span0, "class", "lbl svelte-1221t5r");
-			attr(span1, "class", "lbl svelte-1221t5r");
-			attr(span2, "class", "lbl svelte-1221t5r");
-			attr(span3, "class", "lbl svelte-1221t5r");
-			attr(span4, "class", "lbl svelte-1221t5r");
-			attr(span5, "class", "lbl svelte-1221t5r");
-			attr(div6, "class", "grid svelte-1221t5r");
-			attr(div7, "class", "card mb-10 svelte-1221t5r");
-			attr(div8, "class", "card mb-10 wind svelte-1221t5r");
+			attr(span0, "class", "lbl svelte-9uit39");
+			attr(span1, "class", "lbl svelte-9uit39");
+			attr(span2, "class", "lbl svelte-9uit39");
+			attr(span3, "class", "lbl svelte-9uit39");
+			attr(span4, "class", "lbl svelte-9uit39");
+			attr(span5, "class", "lbl svelte-9uit39");
+			attr(div6, "class", "grid svelte-9uit39");
+			attr(div7, "class", "card mb-10 svelte-9uit39");
+			attr(div8, "class", "card mb-10 wind svelte-9uit39");
 		},
 		m(target, anchor) {
 			insert(target, div7, anchor);
@@ -2090,17 +2322,17 @@ function create_if_block_4(ctx) {
 			if_block.m(div8, null);
 		},
 		p(ctx, dirty) {
-			if (dirty[0] & /*current*/ 256 && t1_value !== (t1_value = /*fmtDeg*/ ctx[18](/*current*/ ctx[8].heading) + "")) set_data(t1, t1_value);
-			if (dirty[0] & /*current*/ 256 && t4_value !== (t4_value = /*fmt*/ ctx[17](/*current*/ ctx[8].sog, 1) + "")) set_data(t4, t4_value);
-			if (dirty[0] & /*current*/ 256 && t8_value !== (t8_value = /*fmtDeg*/ ctx[18](/*current*/ ctx[8].cog) + "")) set_data(t8, t8_value);
-			if (dirty[0] & /*current*/ 256 && t11_value !== (t11_value = /*fmt*/ ctx[17](/*current*/ ctx[8].roll, 0) + "")) set_data(t11, t11_value);
-			if (dirty[0] & /*current*/ 256 && t15_value !== (t15_value = /*fmt*/ ctx[17](/*current*/ ctx[8].pitch, 0) + "")) set_data(t15, t15_value);
+			if (dirty[0] & /*current*/ 1024 && t1_value !== (t1_value = /*fmtDeg*/ ctx[27](/*current*/ ctx[10].heading) + "")) set_data(t1, t1_value);
+			if (dirty[0] & /*current*/ 1024 && t4_value !== (t4_value = /*fmt*/ ctx[26](/*current*/ ctx[10].sog, 1) + "")) set_data(t4, t4_value);
+			if (dirty[0] & /*current*/ 1024 && t8_value !== (t8_value = /*fmtDeg*/ ctx[27](/*current*/ ctx[10].cog) + "")) set_data(t8, t8_value);
+			if (dirty[0] & /*current*/ 1024 && t11_value !== (t11_value = /*fmt*/ ctx[26](/*current*/ ctx[10].roll, 0) + "")) set_data(t11, t11_value);
+			if (dirty[0] & /*current*/ 1024 && t15_value !== (t15_value = /*fmt*/ ctx[26](/*current*/ ctx[10].pitch, 0) + "")) set_data(t15, t15_value);
 
-			if (dirty[0] & /*current*/ 256 && t19_value !== (t19_value = (/*current*/ ctx[8].t
-			? new Date(/*current*/ ctx[8].t).toLocaleTimeString()
+			if (dirty[0] & /*current*/ 1024 && t19_value !== (t19_value = (/*current*/ ctx[10].t
+			? new Date(/*current*/ ctx[10].t).toLocaleTimeString()
 			: '—') + "")) set_data(t19, t19_value);
 
-			if (current_block_type === (current_block_type = select_block_type_3(ctx)) && if_block) {
+			if (current_block_type === (current_block_type = select_block_type_4(ctx)) && if_block) {
 				if_block.p(ctx, dirty);
 			} else {
 				if_block.d(1);
@@ -2124,15 +2356,15 @@ function create_if_block_4(ctx) {
 	};
 }
 
-// (120:12) {:else}
-function create_else_block(ctx) {
+// (136:12) {:else}
+function create_else_block_1(ctx) {
 	let span;
 	let t;
 
 	return {
 		c() {
 			span = element("span");
-			t = text(/*windMsg*/ ctx[13]);
+			t = text(/*windMsg*/ ctx[16]);
 			attr(span, "class", "size-xs");
 		},
 		m(target, anchor) {
@@ -2140,7 +2372,7 @@ function create_else_block(ctx) {
 			append(span, t);
 		},
 		p(ctx, dirty) {
-			if (dirty[0] & /*windMsg*/ 8192) set_data(t, /*windMsg*/ ctx[13]);
+			if (dirty[0] & /*windMsg*/ 65536) set_data(t, /*windMsg*/ ctx[16]);
 		},
 		d(detaching) {
 			if (detaching) {
@@ -2150,21 +2382,21 @@ function create_else_block(ctx) {
 	};
 }
 
-// (108:12) {#if windInfo}
-function create_if_block_5(ctx) {
+// (124:12) {#if windInfo}
+function create_if_block_7(ctx) {
 	let div2;
 	let div0;
 	let span0;
-	let t1_value = /*windInfo*/ ctx[12].speed + "";
+	let t1_value = /*windInfo*/ ctx[15].speed + "";
 	let t1;
 	let t2;
 	let div1;
 	let span1;
-	let t4_value = Math.round(/*windInfo*/ ctx[12].dir) + "";
+	let t4_value = Math.round(/*windInfo*/ ctx[15].dir) + "";
 	let t4;
 	let t5;
 	let t6;
-	let if_block = /*windInfo*/ ctx[12].twa !== null && create_if_block_6(ctx);
+	let if_block = /*windInfo*/ ctx[15].twa !== null && create_if_block_8(ctx);
 
 	return {
 		c() {
@@ -2181,9 +2413,9 @@ function create_if_block_5(ctx) {
 			t5 = text("°");
 			t6 = space();
 			if (if_block) if_block.c();
-			attr(span0, "class", "lbl svelte-1221t5r");
-			attr(span1, "class", "lbl svelte-1221t5r");
-			attr(div2, "class", "grid svelte-1221t5r");
+			attr(span0, "class", "lbl svelte-9uit39");
+			attr(span1, "class", "lbl svelte-9uit39");
+			attr(div2, "class", "grid svelte-9uit39");
 		},
 		m(target, anchor) {
 			insert(target, div2, anchor);
@@ -2199,14 +2431,14 @@ function create_if_block_5(ctx) {
 			if (if_block) if_block.m(div2, null);
 		},
 		p(ctx, dirty) {
-			if (dirty[0] & /*windInfo*/ 4096 && t1_value !== (t1_value = /*windInfo*/ ctx[12].speed + "")) set_data(t1, t1_value);
-			if (dirty[0] & /*windInfo*/ 4096 && t4_value !== (t4_value = Math.round(/*windInfo*/ ctx[12].dir) + "")) set_data(t4, t4_value);
+			if (dirty[0] & /*windInfo*/ 32768 && t1_value !== (t1_value = /*windInfo*/ ctx[15].speed + "")) set_data(t1, t1_value);
+			if (dirty[0] & /*windInfo*/ 32768 && t4_value !== (t4_value = Math.round(/*windInfo*/ ctx[15].dir) + "")) set_data(t4, t4_value);
 
-			if (/*windInfo*/ ctx[12].twa !== null) {
+			if (/*windInfo*/ ctx[15].twa !== null) {
 				if (if_block) {
 					if_block.p(ctx, dirty);
 				} else {
-					if_block = create_if_block_6(ctx);
+					if_block = create_if_block_8(ctx);
 					if_block.c();
 					if_block.m(div2, null);
 				}
@@ -2225,19 +2457,19 @@ function create_if_block_5(ctx) {
 	};
 }
 
-// (112:20) {#if windInfo.twa !== null}
-function create_if_block_6(ctx) {
+// (128:20) {#if windInfo.twa !== null}
+function create_if_block_8(ctx) {
 	let div0;
 	let span0;
-	let t1_value = Math.abs(Math.round(/*windInfo*/ ctx[12].twa)) + "";
+	let t1_value = Math.abs(Math.round(/*windInfo*/ ctx[15].twa)) + "";
 	let t1;
 	let t2;
-	let t3_value = (/*windInfo*/ ctx[12].twa >= 0 ? 'Er' : 'Br') + "";
+	let t3_value = (/*windInfo*/ ctx[15].twa >= 0 ? 'Er' : 'Br') + "";
 	let t3;
 	let t4;
 	let div1;
 	let span1;
-	let t6_value = pointOfSail(/*windInfo*/ ctx[12].twa) + "";
+	let t6_value = pointOfSail(/*windInfo*/ ctx[15].twa) + "";
 	let t6;
 
 	return {
@@ -2253,8 +2485,8 @@ function create_if_block_6(ctx) {
 			span1 = element("span");
 			span1.textContent = "Rumbo vs viento";
 			t6 = text(t6_value);
-			attr(span0, "class", "lbl svelte-1221t5r");
-			attr(span1, "class", "lbl svelte-1221t5r");
+			attr(span0, "class", "lbl svelte-9uit39");
+			attr(span1, "class", "lbl svelte-9uit39");
 		},
 		m(target, anchor) {
 			insert(target, div0, anchor);
@@ -2268,9 +2500,9 @@ function create_if_block_6(ctx) {
 			append(div1, t6);
 		},
 		p(ctx, dirty) {
-			if (dirty[0] & /*windInfo*/ 4096 && t1_value !== (t1_value = Math.abs(Math.round(/*windInfo*/ ctx[12].twa)) + "")) set_data(t1, t1_value);
-			if (dirty[0] & /*windInfo*/ 4096 && t3_value !== (t3_value = (/*windInfo*/ ctx[12].twa >= 0 ? 'Er' : 'Br') + "")) set_data(t3, t3_value);
-			if (dirty[0] & /*windInfo*/ 4096 && t6_value !== (t6_value = pointOfSail(/*windInfo*/ ctx[12].twa) + "")) set_data(t6, t6_value);
+			if (dirty[0] & /*windInfo*/ 32768 && t1_value !== (t1_value = Math.abs(Math.round(/*windInfo*/ ctx[15].twa)) + "")) set_data(t1, t1_value);
+			if (dirty[0] & /*windInfo*/ 32768 && t3_value !== (t3_value = (/*windInfo*/ ctx[15].twa >= 0 ? 'Er' : 'Br') + "")) set_data(t3, t3_value);
+			if (dirty[0] & /*windInfo*/ 32768 && t6_value !== (t6_value = pointOfSail(/*windInfo*/ ctx[15].twa) + "")) set_data(t6, t6_value);
 		},
 		d(detaching) {
 			if (detaching) {
@@ -2282,22 +2514,22 @@ function create_if_block_6(ctx) {
 	};
 }
 
-// (126:4) {#if points.length > 1 && !live}
-function create_if_block_3(ctx) {
+// (142:4) {#if points.length > 1 && !live}
+function create_if_block_5(ctx) {
 	let div3;
 	let input;
 	let input_max_value;
 	let t0;
 	let div2;
 	let div0;
-	let t1_value = (/*playing*/ ctx[11] ? '❚❚' : '▶') + "";
+	let t1_value = (/*playing*/ ctx[14] ? '❚❚' : '▶') + "";
 	let t1;
 	let t2;
 	let span;
-	let t3_value = /*index*/ ctx[7] + 1 + "";
+	let t3_value = /*index*/ ctx[9] + 1 + "";
 	let t3;
 	let t4;
-	let t5_value = /*points*/ ctx[6].length + "";
+	let t5_value = /*points*/ ctx[8].length + "";
 	let t5;
 	let t6;
 	let div1;
@@ -2320,20 +2552,20 @@ function create_if_block_3(ctx) {
 			t6 = space();
 			div1 = element("div");
 			div1.textContent = "Encuadrar";
-			attr(input, "class", "slider svelte-1221t5r");
+			attr(input, "class", "slider svelte-9uit39");
 			attr(input, "type", "range");
 			attr(input, "min", "0");
-			attr(input, "max", input_max_value = /*points*/ ctx[6].length - 1);
+			attr(input, "max", input_max_value = /*points*/ ctx[8].length - 1);
 			attr(div0, "class", "button size-xs");
 			attr(span, "class", "size-xs");
 			attr(div1, "class", "button size-xs");
-			attr(div2, "class", "row svelte-1221t5r");
+			attr(div2, "class", "row svelte-9uit39");
 			attr(div3, "class", "mb-10");
 		},
 		m(target, anchor) {
 			insert(target, div3, anchor);
 			append(div3, input);
-			set_input_value(input, /*index*/ ctx[7]);
+			set_input_value(input, /*index*/ ctx[9]);
 			append(div3, t0);
 			append(div3, div2);
 			append(div2, div0);
@@ -2348,28 +2580,28 @@ function create_if_block_3(ctx) {
 
 			if (!mounted) {
 				dispose = [
-					listen(input, "change", /*input_change_input_handler*/ ctx[35]),
-					listen(input, "input", /*input_change_input_handler*/ ctx[35]),
-					listen(input, "change", /*change_handler*/ ctx[36]),
-					listen(div0, "click", /*togglePlay*/ ctx[22]),
-					listen(div1, "click", /*fitTrack*/ ctx[20])
+					listen(input, "change", /*input_change_input_handler*/ ctx[46]),
+					listen(input, "input", /*input_change_input_handler*/ ctx[46]),
+					listen(input, "change", /*change_handler*/ ctx[47]),
+					listen(div0, "click", /*togglePlay*/ ctx[31]),
+					listen(div1, "click", /*fitTrack*/ ctx[29])
 				];
 
 				mounted = true;
 			}
 		},
 		p(ctx, dirty) {
-			if (dirty[0] & /*points*/ 64 && input_max_value !== (input_max_value = /*points*/ ctx[6].length - 1)) {
+			if (dirty[0] & /*points*/ 256 && input_max_value !== (input_max_value = /*points*/ ctx[8].length - 1)) {
 				attr(input, "max", input_max_value);
 			}
 
-			if (dirty[0] & /*index*/ 128) {
-				set_input_value(input, /*index*/ ctx[7]);
+			if (dirty[0] & /*index*/ 512) {
+				set_input_value(input, /*index*/ ctx[9]);
 			}
 
-			if (dirty[0] & /*playing*/ 2048 && t1_value !== (t1_value = (/*playing*/ ctx[11] ? '❚❚' : '▶') + "")) set_data(t1, t1_value);
-			if (dirty[0] & /*index*/ 128 && t3_value !== (t3_value = /*index*/ ctx[7] + 1 + "")) set_data(t3, t3_value);
-			if (dirty[0] & /*points*/ 64 && t5_value !== (t5_value = /*points*/ ctx[6].length + "")) set_data(t5, t5_value);
+			if (dirty[0] & /*playing*/ 16384 && t1_value !== (t1_value = (/*playing*/ ctx[14] ? '❚❚' : '▶') + "")) set_data(t1, t1_value);
+			if (dirty[0] & /*index*/ 512 && t3_value !== (t3_value = /*index*/ ctx[9] + 1 + "")) set_data(t3, t3_value);
+			if (dirty[0] & /*points*/ 256 && t5_value !== (t5_value = /*points*/ ctx[8].length + "")) set_data(t5, t5_value);
 		},
 		d(detaching) {
 			if (detaching) {
@@ -2382,17 +2614,17 @@ function create_if_block_3(ctx) {
 	};
 }
 
-// (145:4) {#if points.length > 1}
-function create_if_block_1(ctx) {
+// (161:4) {#if points.length > 1}
+function create_if_block_3(ctx) {
 	let div;
-	let t0_value = /*stats*/ ctx[14].distance.toFixed(1) + "";
+	let t0_value = /*stats*/ ctx[17].distance.toFixed(1) + "";
 	let t0;
 	let t1;
 	let t2;
-	let t3_value = /*stats*/ ctx[14].maxSog.toFixed(1) + "";
+	let t3_value = /*stats*/ ctx[17].maxSog.toFixed(1) + "";
 	let t3;
 	let t4;
-	let if_block = /*stats*/ ctx[14].duration && create_if_block_2(ctx);
+	let if_block = /*stats*/ ctx[17].duration && create_if_block_4(ctx);
 
 	return {
 		c() {
@@ -2403,7 +2635,7 @@ function create_if_block_1(ctx) {
 			t2 = text("\n            · máx ");
 			t3 = text(t3_value);
 			t4 = text(" kn");
-			attr(div, "class", "size-xs mb-10 stats svelte-1221t5r");
+			attr(div, "class", "size-xs mb-10 stats svelte-9uit39");
 		},
 		m(target, anchor) {
 			insert(target, div, anchor);
@@ -2415,13 +2647,13 @@ function create_if_block_1(ctx) {
 			append(div, t4);
 		},
 		p(ctx, dirty) {
-			if (dirty[0] & /*stats*/ 16384 && t0_value !== (t0_value = /*stats*/ ctx[14].distance.toFixed(1) + "")) set_data(t0, t0_value);
+			if (dirty[0] & /*stats*/ 131072 && t0_value !== (t0_value = /*stats*/ ctx[17].distance.toFixed(1) + "")) set_data(t0, t0_value);
 
-			if (/*stats*/ ctx[14].duration) {
+			if (/*stats*/ ctx[17].duration) {
 				if (if_block) {
 					if_block.p(ctx, dirty);
 				} else {
-					if_block = create_if_block_2(ctx);
+					if_block = create_if_block_4(ctx);
 					if_block.c();
 					if_block.m(div, t2);
 				}
@@ -2430,7 +2662,7 @@ function create_if_block_1(ctx) {
 				if_block = null;
 			}
 
-			if (dirty[0] & /*stats*/ 16384 && t3_value !== (t3_value = /*stats*/ ctx[14].maxSog.toFixed(1) + "")) set_data(t3, t3_value);
+			if (dirty[0] & /*stats*/ 131072 && t3_value !== (t3_value = /*stats*/ ctx[17].maxSog.toFixed(1) + "")) set_data(t3, t3_value);
 		},
 		d(detaching) {
 			if (detaching) {
@@ -2442,10 +2674,10 @@ function create_if_block_1(ctx) {
 	};
 }
 
-// (148:12) {#if stats.duration}
-function create_if_block_2(ctx) {
+// (164:12) {#if stats.duration}
+function create_if_block_4(ctx) {
 	let t0;
-	let t1_value = /*fmtDuration*/ ctx[19](/*stats*/ ctx[14].duration) + "";
+	let t1_value = /*fmtDuration*/ ctx[28](/*stats*/ ctx[17].duration) + "";
 	let t1;
 
 	return {
@@ -2458,7 +2690,7 @@ function create_if_block_2(ctx) {
 			insert(target, t1, anchor);
 		},
 		p(ctx, dirty) {
-			if (dirty[0] & /*stats*/ 16384 && t1_value !== (t1_value = /*fmtDuration*/ ctx[19](/*stats*/ ctx[14].duration) + "")) set_data(t1, t1_value);
+			if (dirty[0] & /*stats*/ 131072 && t1_value !== (t1_value = /*fmtDuration*/ ctx[28](/*stats*/ ctx[17].duration) + "")) set_data(t1, t1_value);
 		},
 		d(detaching) {
 			if (detaching) {
@@ -2469,8 +2701,8 @@ function create_if_block_2(ctx) {
 	};
 }
 
-// (161:4) {#if points.length}
-function create_if_block(ctx) {
+// (177:4) {#if points.length}
+function create_if_block_2(ctx) {
 	let div;
 	let mounted;
 	let dispose;
@@ -2485,7 +2717,7 @@ function create_if_block(ctx) {
 			insert(target, div, anchor);
 
 			if (!mounted) {
-				dispose = listen(div, "click", /*clearTrack*/ ctx[26]);
+				dispose = listen(div, "click", /*clearTrack*/ ctx[35]);
 				mounted = true;
 			}
 		},
@@ -2501,103 +2733,313 @@ function create_if_block(ctx) {
 	};
 }
 
+// (198:8) {:else}
+function create_else_block(ctx) {
+	let label;
+	let t;
+	let input;
+	let mounted;
+	let dispose;
+
+	return {
+		c() {
+			label = element("label");
+			t = text("Cargar ruta (GPX, CSV, NMEA, JSON)\n                ");
+			input = element("input");
+			attr(input, "type", "file");
+			attr(input, "accept", ".gpx,.csv,.txt,.nmea,.log,.json,.geojson");
+			attr(input, "class", "svelte-9uit39");
+			attr(label, "class", "button size-xs file-btn svelte-9uit39");
+		},
+		m(target, anchor) {
+			insert(target, label, anchor);
+			append(label, t);
+			append(label, input);
+
+			if (!mounted) {
+				dispose = listen(input, "change", /*onRefFile*/ ctx[25]);
+				mounted = true;
+			}
+		},
+		p: noop,
+		d(detaching) {
+			if (detaching) {
+				detach(label);
+			}
+
+			mounted = false;
+			dispose();
+		}
+	};
+}
+
+// (184:8) {#if refPoints.length}
+function create_if_block(ctx) {
+	let div0;
+	let span;
+	let t0;
+	let t1;
+	let t2;
+	let t3_value = /*refDistance*/ ctx[19].toFixed(1) + "";
+	let t3;
+	let t4;
+	let t5;
+	let t6;
+	let div3;
+	let div1;
+	let t8;
+	let div2;
+	let mounted;
+	let dispose;
+	let if_block = /*current*/ ctx[10] && /*refInfo*/ ctx[18] && create_if_block_1(ctx);
+
+	return {
+		c() {
+			div0 = element("div");
+			span = element("span");
+			t0 = space();
+			t1 = text(/*refName*/ ctx[11]);
+			t2 = text(" · ");
+			t3 = text(t3_value);
+			t4 = text(" NM");
+			t5 = space();
+			if (if_block) if_block.c();
+			t6 = space();
+			div3 = element("div");
+			div1 = element("div");
+			div1.textContent = "Encuadrar";
+			t8 = space();
+			div2 = element("div");
+			div2.textContent = "Quitar";
+			attr(span, "class", "ref-swatch svelte-9uit39");
+			attr(div0, "class", "size-xs mb-5");
+			attr(div1, "class", "button size-xs");
+			attr(div2, "class", "button size-xs");
+			attr(div3, "class", "row svelte-9uit39");
+		},
+		m(target, anchor) {
+			insert(target, div0, anchor);
+			append(div0, span);
+			append(div0, t0);
+			append(div0, t1);
+			append(div0, t2);
+			append(div0, t3);
+			append(div0, t4);
+			insert(target, t5, anchor);
+			if (if_block) if_block.m(target, anchor);
+			insert(target, t6, anchor);
+			insert(target, div3, anchor);
+			append(div3, div1);
+			append(div3, t8);
+			append(div3, div2);
+
+			if (!mounted) {
+				dispose = [
+					listen(div1, "click", /*fitRef*/ ctx[23]),
+					listen(div2, "click", /*clearRef*/ ctx[24])
+				];
+
+				mounted = true;
+			}
+		},
+		p(ctx, dirty) {
+			if (dirty[0] & /*refName*/ 2048) set_data(t1, /*refName*/ ctx[11]);
+			if (dirty[0] & /*refDistance*/ 524288 && t3_value !== (t3_value = /*refDistance*/ ctx[19].toFixed(1) + "")) set_data(t3, t3_value);
+
+			if (/*current*/ ctx[10] && /*refInfo*/ ctx[18]) {
+				if (if_block) {
+					if_block.p(ctx, dirty);
+				} else {
+					if_block = create_if_block_1(ctx);
+					if_block.c();
+					if_block.m(t6.parentNode, t6);
+				}
+			} else if (if_block) {
+				if_block.d(1);
+				if_block = null;
+			}
+		},
+		d(detaching) {
+			if (detaching) {
+				detach(div0);
+				detach(t5);
+				detach(t6);
+				detach(div3);
+			}
+
+			if (if_block) if_block.d(detaching);
+			mounted = false;
+			run_all(dispose);
+		}
+	};
+}
+
+// (189:12) {#if current && refInfo}
+function create_if_block_1(ctx) {
+	let div;
+	let t0;
+	let t1_value = /*refInfo*/ ctx[18].xte.toFixed(2) + "";
+	let t1;
+	let t2;
+	let t3_value = /*refInfo*/ ctx[18].remaining.toFixed(1) + "";
+	let t3;
+	let t4;
+
+	return {
+		c() {
+			div = element("div");
+			t0 = text("Desvío ");
+			t1 = text(t1_value);
+			t2 = text(" NM · Faltan ");
+			t3 = text(t3_value);
+			t4 = text(" NM");
+			attr(div, "class", "size-xs mb-5");
+		},
+		m(target, anchor) {
+			insert(target, div, anchor);
+			append(div, t0);
+			append(div, t1);
+			append(div, t2);
+			append(div, t3);
+			append(div, t4);
+		},
+		p(ctx, dirty) {
+			if (dirty[0] & /*refInfo*/ 262144 && t1_value !== (t1_value = /*refInfo*/ ctx[18].xte.toFixed(2) + "")) set_data(t1, t1_value);
+			if (dirty[0] & /*refInfo*/ 262144 && t3_value !== (t3_value = /*refInfo*/ ctx[18].remaining.toFixed(1) + "")) set_data(t3, t3_value);
+		},
+		d(detaching) {
+			if (detaching) {
+				detach(div);
+			}
+		}
+	};
+}
+
 function create_fragment(ctx) {
 	let div0;
 	let t1;
 	let section;
 	let t2;
-	let div4;
+	let div5;
 	let div1;
 	let t4;
 	let div2;
 	let t6;
 	let div3;
 	let t8;
-	let t9;
+	let div4;
 	let t10;
 	let t11;
 	let t12;
 	let t13;
 	let t14;
-	let label0;
-	let input0;
 	let t15;
 	let t16;
-	let label1;
-	let input1;
+	let label0;
+	let input0;
 	let t17;
 	let t18;
+	let label1;
+	let input1;
+	let t19;
+	let t20;
+	let t21;
+	let div7;
+	let div6;
+	let t23;
 	let mounted;
 	let dispose;
-	let if_block0 = !isMobileOrTablet && create_if_block_13(ctx);
+	let if_block0 = !isMobileOrTablet && create_if_block_17(ctx);
 
 	function select_block_type(ctx, dirty) {
-		if (/*source*/ ctx[0] === 'file') return create_if_block_10;
-		if (/*source*/ ctx[0] === 'serial') return create_if_block_11;
-		return create_else_block_3;
+		if (/*source*/ ctx[0] === 'file') return create_if_block_12;
+		if (/*source*/ ctx[0] === 'gps') return create_if_block_13;
+		if (/*source*/ ctx[0] === 'serial') return create_if_block_15;
+		return create_else_block_5;
 	}
 
 	let current_block_type = select_block_type(ctx);
 	let if_block1 = current_block_type(ctx);
-	let if_block2 = /*source*/ ctx[0] !== 'file' && create_if_block_8(ctx);
-	let if_block3 = /*error*/ ctx[10] && create_if_block_7(ctx);
-	let if_block4 = /*current*/ ctx[8] && create_if_block_4(ctx);
-	let if_block5 = /*points*/ ctx[6].length > 1 && !/*live*/ ctx[9] && create_if_block_3(ctx);
-	let if_block6 = /*points*/ ctx[6].length > 1 && create_if_block_1(ctx);
-	let if_block7 = /*points*/ ctx[6].length && create_if_block(ctx);
+	let if_block2 = /*source*/ ctx[0] !== 'file' && create_if_block_10(ctx);
+	let if_block3 = /*error*/ ctx[13] && create_if_block_9(ctx);
+	let if_block4 = /*current*/ ctx[10] && create_if_block_6(ctx);
+	let if_block5 = /*points*/ ctx[8].length > 1 && !/*live*/ ctx[12] && create_if_block_5(ctx);
+	let if_block6 = /*points*/ ctx[8].length > 1 && create_if_block_3(ctx);
+	let if_block7 = /*points*/ ctx[8].length && create_if_block_2(ctx);
+
+	function select_block_type_5(ctx, dirty) {
+		if (/*refPoints*/ ctx[7].length) return create_if_block;
+		return create_else_block;
+	}
+
+	let current_block_type_1 = select_block_type_5(ctx);
+	let if_block8 = current_block_type_1(ctx);
 
 	return {
 		c() {
 			div0 = element("div");
-			div0.textContent = `${/*title*/ ctx[15]}`;
+			div0.textContent = `${/*title*/ ctx[20]}`;
 			t1 = space();
 			section = element("section");
 			if (if_block0) if_block0.c();
 			t2 = space();
-			div4 = element("div");
+			div5 = element("div");
 			div1 = element("div");
 			div1.textContent = "Archivo";
 			t4 = space();
 			div2 = element("div");
-			div2.textContent = "USB";
+			div2.textContent = "GPS tablet";
 			t6 = space();
 			div3 = element("div");
-			div3.textContent = "Wi‑Fi / URL";
+			div3.textContent = "USB";
 			t8 = space();
-			if_block1.c();
-			t9 = space();
-			if (if_block2) if_block2.c();
+			div4 = element("div");
+			div4.textContent = "Wi‑Fi / URL";
 			t10 = space();
-			if (if_block3) if_block3.c();
+			if_block1.c();
 			t11 = space();
-			if (if_block4) if_block4.c();
+			if (if_block2) if_block2.c();
 			t12 = space();
-			if (if_block5) if_block5.c();
+			if (if_block3) if_block3.c();
 			t13 = space();
-			if (if_block6) if_block6.c();
+			if (if_block4) if_block4.c();
 			t14 = space();
+			if (if_block5) if_block5.c();
+			t15 = space();
+			if (if_block6) if_block6.c();
+			t16 = space();
 			label0 = element("label");
 			input0 = element("input");
-			t15 = text("\n        Sincronizar hora del pronóstico con el track");
-			t16 = space();
+			t17 = text("\n        Sincronizar hora del pronóstico con el track");
+			t18 = space();
 			label1 = element("label");
 			input1 = element("input");
-			t17 = text("\n        Seguir al barco");
-			t18 = space();
+			t19 = text("\n        Seguir al barco");
+			t20 = space();
 			if (if_block7) if_block7.c();
+			t21 = space();
+			div7 = element("div");
+			div6 = element("div");
+			div6.textContent = "Ruta de referencia";
+			t23 = space();
+			if_block8.c();
 			attr(div0, "class", "plugin__mobile-header");
-			attr(div1, "class", "tab clickable svelte-1221t5r");
+			attr(div1, "class", "tab clickable svelte-9uit39");
 			toggle_class(div1, "active", /*source*/ ctx[0] === 'file');
-			attr(div2, "class", "tab clickable svelte-1221t5r");
-			toggle_class(div2, "active", /*source*/ ctx[0] === 'serial');
-			attr(div3, "class", "tab clickable svelte-1221t5r");
-			toggle_class(div3, "active", /*source*/ ctx[0] === 'http');
-			attr(div4, "class", "tabs mb-10 svelte-1221t5r");
+			attr(div2, "class", "tab clickable svelte-9uit39");
+			toggle_class(div2, "active", /*source*/ ctx[0] === 'gps');
+			attr(div3, "class", "tab clickable svelte-9uit39");
+			toggle_class(div3, "active", /*source*/ ctx[0] === 'serial');
+			attr(div4, "class", "tab clickable svelte-9uit39");
+			toggle_class(div4, "active", /*source*/ ctx[0] === 'http');
+			attr(div5, "class", "tabs mb-10 svelte-9uit39");
 			attr(input0, "type", "checkbox");
-			attr(label0, "class", "size-xs check svelte-1221t5r");
+			attr(label0, "class", "size-xs check svelte-9uit39");
 			attr(input1, "type", "checkbox");
-			attr(label1, "class", "size-xs check svelte-1221t5r");
-			attr(section, "class", "plugin__content itrip svelte-1221t5r");
+			attr(label1, "class", "size-xs check svelte-9uit39");
+			attr(div6, "class", "size-xs lbl svelte-9uit39");
+			attr(div7, "class", "ref mt-15 svelte-9uit39");
+			attr(section, "class", "plugin__content itrip svelte-9uit39");
 		},
 		m(target, anchor) {
 			insert(target, div0, anchor);
@@ -2605,44 +3047,52 @@ function create_fragment(ctx) {
 			insert(target, section, anchor);
 			if (if_block0) if_block0.m(section, null);
 			append(section, t2);
-			append(section, div4);
-			append(div4, div1);
-			append(div4, t4);
-			append(div4, div2);
-			append(div4, t6);
-			append(div4, div3);
-			append(section, t8);
-			if_block1.m(section, null);
-			append(section, t9);
-			if (if_block2) if_block2.m(section, null);
+			append(section, div5);
+			append(div5, div1);
+			append(div5, t4);
+			append(div5, div2);
+			append(div5, t6);
+			append(div5, div3);
+			append(div5, t8);
+			append(div5, div4);
 			append(section, t10);
-			if (if_block3) if_block3.m(section, null);
+			if_block1.m(section, null);
 			append(section, t11);
-			if (if_block4) if_block4.m(section, null);
+			if (if_block2) if_block2.m(section, null);
 			append(section, t12);
-			if (if_block5) if_block5.m(section, null);
+			if (if_block3) if_block3.m(section, null);
 			append(section, t13);
-			if (if_block6) if_block6.m(section, null);
+			if (if_block4) if_block4.m(section, null);
 			append(section, t14);
+			if (if_block5) if_block5.m(section, null);
+			append(section, t15);
+			if (if_block6) if_block6.m(section, null);
+			append(section, t16);
 			append(section, label0);
 			append(label0, input0);
 			input0.checked = /*syncTime*/ ctx[4];
-			append(label0, t15);
-			append(section, t16);
+			append(label0, t17);
+			append(section, t18);
 			append(section, label1);
 			append(label1, input1);
 			input1.checked = /*follow*/ ctx[5];
-			append(label1, t17);
-			append(section, t18);
+			append(label1, t19);
+			append(section, t20);
 			if (if_block7) if_block7.m(section, null);
+			append(section, t21);
+			append(section, div7);
+			append(div7, div6);
+			append(div7, t23);
+			if_block8.m(div7, null);
 
 			if (!mounted) {
 				dispose = [
-					listen(div1, "click", /*click_handler_1*/ ctx[29]),
-					listen(div2, "click", /*click_handler_2*/ ctx[30]),
-					listen(div3, "click", /*click_handler_3*/ ctx[31]),
-					listen(input0, "change", /*input0_change_handler*/ ctx[37]),
-					listen(input1, "change", /*input1_change_handler*/ ctx[38])
+					listen(div1, "click", /*click_handler_1*/ ctx[38]),
+					listen(div2, "click", /*click_handler_2*/ ctx[39]),
+					listen(div3, "click", /*click_handler_3*/ ctx[40]),
+					listen(div4, "click", /*click_handler_4*/ ctx[41]),
+					listen(input0, "change", /*input0_change_handler*/ ctx[48]),
+					listen(input1, "change", /*input1_change_handler*/ ctx[49])
 				];
 
 				mounted = true;
@@ -2656,11 +3106,15 @@ function create_fragment(ctx) {
 			}
 
 			if (dirty[0] & /*source*/ 1) {
-				toggle_class(div2, "active", /*source*/ ctx[0] === 'serial');
+				toggle_class(div2, "active", /*source*/ ctx[0] === 'gps');
 			}
 
 			if (dirty[0] & /*source*/ 1) {
-				toggle_class(div3, "active", /*source*/ ctx[0] === 'http');
+				toggle_class(div3, "active", /*source*/ ctx[0] === 'serial');
+			}
+
+			if (dirty[0] & /*source*/ 1) {
+				toggle_class(div4, "active", /*source*/ ctx[0] === 'http');
 			}
 
 			if (current_block_type === (current_block_type = select_block_type(ctx)) && if_block1) {
@@ -2671,7 +3125,7 @@ function create_fragment(ctx) {
 
 				if (if_block1) {
 					if_block1.c();
-					if_block1.m(section, t9);
+					if_block1.m(section, t11);
 				}
 			}
 
@@ -2679,61 +3133,61 @@ function create_fragment(ctx) {
 				if (if_block2) {
 					if_block2.p(ctx, dirty);
 				} else {
-					if_block2 = create_if_block_8(ctx);
+					if_block2 = create_if_block_10(ctx);
 					if_block2.c();
-					if_block2.m(section, t10);
+					if_block2.m(section, t12);
 				}
 			} else if (if_block2) {
 				if_block2.d(1);
 				if_block2 = null;
 			}
 
-			if (/*error*/ ctx[10]) {
+			if (/*error*/ ctx[13]) {
 				if (if_block3) {
 					if_block3.p(ctx, dirty);
 				} else {
-					if_block3 = create_if_block_7(ctx);
+					if_block3 = create_if_block_9(ctx);
 					if_block3.c();
-					if_block3.m(section, t11);
+					if_block3.m(section, t13);
 				}
 			} else if (if_block3) {
 				if_block3.d(1);
 				if_block3 = null;
 			}
 
-			if (/*current*/ ctx[8]) {
+			if (/*current*/ ctx[10]) {
 				if (if_block4) {
 					if_block4.p(ctx, dirty);
 				} else {
-					if_block4 = create_if_block_4(ctx);
+					if_block4 = create_if_block_6(ctx);
 					if_block4.c();
-					if_block4.m(section, t12);
+					if_block4.m(section, t14);
 				}
 			} else if (if_block4) {
 				if_block4.d(1);
 				if_block4 = null;
 			}
 
-			if (/*points*/ ctx[6].length > 1 && !/*live*/ ctx[9]) {
+			if (/*points*/ ctx[8].length > 1 && !/*live*/ ctx[12]) {
 				if (if_block5) {
 					if_block5.p(ctx, dirty);
 				} else {
-					if_block5 = create_if_block_3(ctx);
+					if_block5 = create_if_block_5(ctx);
 					if_block5.c();
-					if_block5.m(section, t13);
+					if_block5.m(section, t15);
 				}
 			} else if (if_block5) {
 				if_block5.d(1);
 				if_block5 = null;
 			}
 
-			if (/*points*/ ctx[6].length > 1) {
+			if (/*points*/ ctx[8].length > 1) {
 				if (if_block6) {
 					if_block6.p(ctx, dirty);
 				} else {
-					if_block6 = create_if_block_1(ctx);
+					if_block6 = create_if_block_3(ctx);
 					if_block6.c();
-					if_block6.m(section, t14);
+					if_block6.m(section, t16);
 				}
 			} else if (if_block6) {
 				if_block6.d(1);
@@ -2748,17 +3202,29 @@ function create_fragment(ctx) {
 				input1.checked = /*follow*/ ctx[5];
 			}
 
-			if (/*points*/ ctx[6].length) {
+			if (/*points*/ ctx[8].length) {
 				if (if_block7) {
 					if_block7.p(ctx, dirty);
 				} else {
-					if_block7 = create_if_block(ctx);
+					if_block7 = create_if_block_2(ctx);
 					if_block7.c();
-					if_block7.m(section, null);
+					if_block7.m(section, t21);
 				}
 			} else if (if_block7) {
 				if_block7.d(1);
 				if_block7 = null;
+			}
+
+			if (current_block_type_1 === (current_block_type_1 = select_block_type_5(ctx)) && if_block8) {
+				if_block8.p(ctx, dirty);
+			} else {
+				if_block8.d(1);
+				if_block8 = current_block_type_1(ctx);
+
+				if (if_block8) {
+					if_block8.c();
+					if_block8.m(div7, null);
+				}
 			}
 		},
 		i: noop,
@@ -2778,6 +3244,7 @@ function create_fragment(ctx) {
 			if (if_block5) if_block5.d();
 			if (if_block6) if_block6.d();
 			if (if_block7) if_block7.d();
+			if_block8.d();
 			mounted = false;
 			run_all(dispose);
 		}
@@ -2785,12 +3252,16 @@ function create_fragment(ctx) {
 }
 
 const SETTINGS_KEY = 'windy-plugin-itrip-settings';
+const REF_KEY = 'windy-plugin-itrip-ref';
 
 function instance($$self, $$props, $$invalidate) {
+	let refDistance;
+	let refInfo;
 	let current;
 	let stats;
 	const { title } = config;
 	const serialSupported = isSerialSupported();
+	const geoSupported = isGeolocationSupported();
 
 	const loadSettings = () => {
 		try {
@@ -2807,6 +3278,112 @@ function instance($$self, $$props, $$invalidate) {
 	let pollSeconds = saved.pollSeconds || 2;
 	let syncTime = saved.syncTime !== false;
 	let follow = saved.follow !== false;
+	let useCompass = saved.useCompass === true;
+	let refPoints = [];
+	let refName = '';
+	let refLine = null;
+
+	function drawRef() {
+		refLine?.remove();
+		refLine = null;
+
+		if (refPoints.length > 1) {
+			refLine = new L.Polyline(refPoints,
+			{
+					color: '#00e5ff',
+					weight: 2.5,
+					opacity: 0.9,
+					dashArray: '8 6'
+				}).addTo(map);
+		}
+	}
+
+	function fitRef() {
+		if (refLine) {
+			map.fitBounds(refLine.getBounds(), { padding: 40 });
+		}
+	}
+
+	function clearRef() {
+		$$invalidate(7, refPoints = []);
+		$$invalidate(11, refName = '');
+		refLine?.remove();
+		refLine = null;
+
+		try {
+			localStorage.removeItem(REF_KEY);
+		} catch {
+			
+		}
+	}
+
+	async function onRefFile(e) {
+		const input = e.target;
+		const file = input.files?.[0];
+
+		if (!file) {
+			return;
+		}
+
+		$$invalidate(13, error = '');
+
+		try {
+			const pts = parseFile(file.name, await file.text());
+
+			if (pts.length < 2) {
+				$$invalidate(13, error = 'La ruta necesita al menos 2 posiciones.');
+				return;
+			}
+
+			$$invalidate(7, refPoints = pts.map(p => [p.lat, p.lon]));
+			$$invalidate(11, refName = file.name.replace(/\.[^.]+$/, ''));
+			drawRef();
+			fitRef();
+
+			try {
+				localStorage.setItem(REF_KEY, JSON.stringify({ name: refName, points: refPoints }));
+			} catch {
+				
+			}
+		} catch(err) {
+			$$invalidate(13, error = `Error leyendo la ruta: ${err.message}`);
+		} finally {
+			input.value = '';
+		}
+	}
+
+	function restoreRef() {
+		try {
+			const data = JSON.parse(localStorage.getItem(REF_KEY) || 'null');
+
+			if (data && Array.isArray(data.points)) {
+				$$invalidate(7, refPoints = data.points);
+				$$invalidate(11, refName = data.name || 'Ruta');
+				drawRef();
+			}
+		} catch {
+			
+		}
+	}
+
+	let nowTimer = null;
+	let wakeLock = null;
+
+	const setForecastNow = () => {
+		if (syncTime) {
+			store.set('timestamp', Date.now());
+		}
+	};
+
+	async function keepScreenOn() {
+		try {
+			const nav = navigator;
+			wakeLock = await nav.wakeLock?.request('screen') ?? null;
+		} catch {
+			wakeLock = null;
+		}
+	}
+
 	let points = [];
 	let index = 0;
 	let live = null;
@@ -2941,8 +3518,8 @@ function instance($$self, $$props, $$invalidate) {
 		const req = ++windRequest;
 
 		if (store.get('overlay') !== 'wind') {
-			$$invalidate(12, windInfo = null);
-			$$invalidate(13, windMsg = 'Activa la capa de viento para ver TWS / TWA.');
+			$$invalidate(15, windInfo = null);
+			$$invalidate(16, windMsg = 'Activa la capa de viento para ver TWS / TWA.');
 			setWindArrow(marker, null);
 			return;
 		}
@@ -2956,8 +3533,8 @@ function instance($$self, $$props, $$invalidate) {
 		const values = interpolate?.({ lat: p.lat, lon: p.lon });
 
 		if (!Array.isArray(values)) {
-			$$invalidate(12, windInfo = null);
-			$$invalidate(13, windMsg = 'Sin datos de viento en esta posición.');
+			$$invalidate(15, windInfo = null);
+			$$invalidate(16, windMsg = 'Sin datos de viento en esta posición.');
 			setWindArrow(marker, null);
 			return;
 		}
@@ -2965,7 +3542,7 @@ function instance($$self, $$props, $$invalidate) {
 		const { dir, wind } = wind2obj(values);
 		const hdg = headingOf(p);
 
-		$$invalidate(12, windInfo = {
+		$$invalidate(15, windInfo = {
 			speed: metrics.wind.convertValue(wind),
 			dir,
 			twa: hdg === undefined ? null : trueWindAngle(dir, hdg)
@@ -3005,10 +3582,10 @@ function instance($$self, $$props, $$invalidate) {
 		}
 
 		if (index >= points.length - 1) {
-			$$invalidate(7, index = 0);
+			$$invalidate(9, index = 0);
 		}
 
-		$$invalidate(11, playing = true);
+		$$invalidate(14, playing = true);
 		const step = Math.max(1, Math.round(points.length / 600));
 
 		playTimer = setInterval(
@@ -3019,7 +3596,7 @@ function instance($$self, $$props, $$invalidate) {
 					return;
 				}
 
-				$$invalidate(7, index = Math.min(points.length - 1, index + step));
+				$$invalidate(9, index = Math.min(points.length - 1, index + step));
 				syncTimestamp();
 			},
 			150
@@ -3027,7 +3604,7 @@ function instance($$self, $$props, $$invalidate) {
 	}
 
 	function stopPlay() {
-		$$invalidate(11, playing = false);
+		$$invalidate(14, playing = false);
 
 		if (playTimer) {
 			clearInterval(playTimer);
@@ -3037,8 +3614,8 @@ function instance($$self, $$props, $$invalidate) {
 
 	function setTrack(pts) {
 		stopPlay();
-		$$invalidate(6, points = enrich(pts));
-		$$invalidate(7, index = 0);
+		$$invalidate(8, points = enrich(pts));
+		$$invalidate(9, index = 0);
 		drawTrack();
 		fitTrack();
 		syncTimestamp(true);
@@ -3052,13 +3629,13 @@ function instance($$self, $$props, $$invalidate) {
 			return;
 		}
 
-		$$invalidate(10, error = '');
+		$$invalidate(13, error = '');
 
 		try {
 			const pts = parseFile(file.name, await file.text());
 
 			if (!pts.length) {
-				$$invalidate(10, error = 'No se han encontrado posiciones válidas en el archivo.');
+				$$invalidate(13, error = 'No se han encontrado posiciones válidas en el archivo.');
 				return;
 			}
 
@@ -3067,7 +3644,7 @@ function instance($$self, $$props, $$invalidate) {
 			setTrack(pts);
 			$$invalidate(5, follow = wasFollow);
 		} catch(err) {
-			$$invalidate(10, error = `Error leyendo el archivo: ${err.message}`);
+			$$invalidate(13, error = `Error leyendo el archivo: ${err.message}`);
 		} finally {
 			input.value = '';
 		}
@@ -3080,7 +3657,7 @@ function instance($$self, $$props, $$invalidate) {
 
 			if (last) {
 				Object.assign(last, p);
-				$$invalidate(6, points);
+				$$invalidate(8, points);
 			}
 
 			return;
@@ -3100,50 +3677,73 @@ function instance($$self, $$props, $$invalidate) {
 
 		points.push(pt);
 		enrich(points.slice(-2));
-		$$invalidate(6, points);
-		$$invalidate(7, index = points.length - 1);
+		$$invalidate(8, points);
+		$$invalidate(9, index = points.length - 1);
 		drawTrack();
 	}
 
 	async function startLive() {
-		$$invalidate(10, error = '');
+		$$invalidate(13, error = '');
 		stopPlay();
+		clearTrack();
 		liveAttitude = {};
 
 		try {
-			if (source === 'serial') {
-				$$invalidate(9, live = await startSerial(Number(baudRate), onLivePoint));
+			if (source === 'gps') {
+				$$invalidate(12, live = await startGeolocation(useCompass, onLivePoint, msg => {
+					$$invalidate(13, error = msg);
+				}));
+			} else if (source === 'serial') {
+				$$invalidate(12, live = await startSerial(Number(baudRate), onLivePoint));
 			} else {
 				if (!(/^https?:\/\//).test(httpUrl)) {
-					$$invalidate(10, error = 'Introduce una URL válida (https://…).');
+					$$invalidate(13, error = 'Introduce una URL válida (https://…).');
 					return;
 				}
 
-				$$invalidate(9, live = startHttpPolling(httpUrl, Number(pollSeconds) * 1000, onLivePoint, msg => {
-					$$invalidate(10, error = msg);
+				$$invalidate(12, live = startHttpPolling(httpUrl, Number(pollSeconds) * 1000, onLivePoint, msg => {
+					$$invalidate(13, error = msg);
 				}));
 			}
 
-			if (syncTime) {
-				store.set('timestamp', Date.now());
-			}
+			setForecastNow();
+			nowTimer = setInterval(setForecastNow, 5 * 60 * 1000);
+			keepScreenOn();
 		} catch(err) {
-			$$invalidate(10, error = `No se pudo conectar: ${err.message}`);
-			$$invalidate(9, live = null);
+			$$invalidate(13, error = `No se pudo conectar: ${err.message}`);
+			$$invalidate(12, live = null);
 		}
 	}
 
 	async function stopLive() {
 		const l = live;
-		$$invalidate(9, live = null);
+		$$invalidate(12, live = null);
+
+		if (nowTimer) {
+			clearInterval(nowTimer);
+			nowTimer = null;
+		}
+
+		wakeLock?.release().catch(() => {
+			
+		});
+
+		wakeLock = null;
 		await l?.stop();
 	}
 
+	const onVisibility = () => {
+		if (live && document.visibilityState === 'visible') {
+			keepScreenOn();
+			setForecastNow();
+		}
+	};
+
 	function clearTrack() {
 		stopPlay();
-		$$invalidate(6, points = []);
-		$$invalidate(7, index = 0);
-		$$invalidate(12, windInfo = null);
+		$$invalidate(8, points = []);
+		$$invalidate(9, index = 0);
+		$$invalidate(15, windInfo = null);
 		removeMapFeatures();
 	}
 
@@ -3159,20 +3759,31 @@ function instance($$self, $$props, $$invalidate) {
 	onMount(() => {
 		bcast.on('redrawFinished', onRedraw);
 		store.on('overlay', onOverlay);
+		document.addEventListener('visibilitychange', onVisibility);
+		restoreRef();
 	});
 
 	onDestroy(() => {
 		stopPlay();
-		live?.stop();
+		stopLive();
 		bcast.off('redrawFinished', onRedraw);
 		store.off('overlay', onOverlay);
+		document.removeEventListener('visibilitychange', onVisibility);
 		removeMapFeatures();
+		refLine?.remove();
+		refLine = null;
 	});
 
 	const click_handler = () => bcast.emit('rqstOpen', 'menu');
 	const click_handler_1 = () => $$invalidate(0, source = 'file');
-	const click_handler_2 = () => $$invalidate(0, source = 'serial');
-	const click_handler_3 = () => $$invalidate(0, source = 'http');
+	const click_handler_2 = () => $$invalidate(0, source = 'gps');
+	const click_handler_3 = () => $$invalidate(0, source = 'serial');
+	const click_handler_4 = () => $$invalidate(0, source = 'http');
+
+	function input_change_handler() {
+		useCompass = this.checked;
+		$$invalidate(6, useCompass);
+	}
 
 	function select_change_handler() {
 		baudRate = select_value(this);
@@ -3191,7 +3802,7 @@ function instance($$self, $$props, $$invalidate) {
 
 	function input_change_input_handler() {
 		index = to_number(this.value);
-		$$invalidate(7, index);
+		$$invalidate(9, index);
 	}
 
 	const change_handler = () => syncTimestamp(true);
@@ -3207,7 +3818,7 @@ function instance($$self, $$props, $$invalidate) {
 	}
 
 	$$self.$$.update = () => {
-		if ($$self.$$.dirty[0] & /*source, baudRate, httpUrl, pollSeconds, syncTime, follow*/ 63) {
+		if ($$self.$$.dirty[0] & /*source, baudRate, httpUrl, pollSeconds, syncTime, follow, useCompass*/ 127) {
 			try {
 				localStorage.setItem(SETTINGS_KEY, JSON.stringify({
 					source,
@@ -3215,22 +3826,33 @@ function instance($$self, $$props, $$invalidate) {
 					httpUrl,
 					pollSeconds,
 					syncTime,
-					follow
+					follow,
+					useCompass
 				}));
 			} catch {
 				
 			}
 		}
 
-		if ($$self.$$.dirty[0] & /*points, index*/ 192) {
-			$$invalidate(8, current = points[index]);
+		if ($$self.$$.dirty[0] & /*refPoints*/ 128) {
+			$$invalidate(19, refDistance = routeLength(refPoints));
 		}
 
-		if ($$self.$$.dirty[0] & /*points*/ 64) {
-			$$invalidate(14, stats = computeStats(points));
+		if ($$self.$$.dirty[0] & /*points, index*/ 768) {
+			$$invalidate(10, current = points[index]);
 		}
 
-		if ($$self.$$.dirty[0] & /*current*/ 256) {
+		if ($$self.$$.dirty[0] & /*current, refPoints*/ 1152) {
+			$$invalidate(18, refInfo = current && refPoints.length > 1
+			? routeProgress(current.lat, current.lon, refPoints)
+			: null);
+		}
+
+		if ($$self.$$.dirty[0] & /*points*/ 256) {
+			$$invalidate(17, stats = computeStats(points));
+		}
+
+		if ($$self.$$.dirty[0] & /*current*/ 1024) {
 			if (current) {
 				updateBoat(current);
 			}
@@ -3244,17 +3866,26 @@ function instance($$self, $$props, $$invalidate) {
 		pollSeconds,
 		syncTime,
 		follow,
+		useCompass,
+		refPoints,
 		points,
 		index,
 		current,
+		refName,
 		live,
 		error,
 		playing,
 		windInfo,
 		windMsg,
 		stats,
+		refInfo,
+		refDistance,
 		title,
 		serialSupported,
+		geoSupported,
+		fitRef,
+		clearRef,
+		onRefFile,
 		fmt,
 		fmtDeg,
 		fmtDuration,
@@ -3270,6 +3901,8 @@ function instance($$self, $$props, $$invalidate) {
 		click_handler_1,
 		click_handler_2,
 		click_handler_3,
+		click_handler_4,
+		input_change_handler,
 		select_change_handler,
 		input_input_handler,
 		select_change_handler_1,
@@ -3283,11 +3916,11 @@ function instance($$self, $$props, $$invalidate) {
 class Plugin extends SvelteComponent {
 	constructor(options) {
 		super();
-		init(this, options, instance, create_fragment, safe_not_equal, { onopen: 27 }, add_css, [-1, -1, -1]);
+		init(this, options, instance, create_fragment, safe_not_equal, { onopen: 36 }, add_css, [-1, -1, -1]);
 	}
 
 	get onopen() {
-		return this.$$.ctx[27];
+		return this.$$.ctx[36];
 	}
 }
 
