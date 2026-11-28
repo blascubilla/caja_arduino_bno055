@@ -1,0 +1,42 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'uy.itrip.barometro'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'uy.itrip.barometro'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '1.0'
+    }
+
+    // Clave fija incluida en el repositorio (app personal): así cualquier compilación
+    // (local o GitHub Actions) puede instalarse encima de la anterior sin desinstalar.
+    signingConfigs {
+        fija {
+            storeFile file('firma-barometro.jks')
+            storePassword 'barometro'
+            keyAlias 'barometro'
+            keyPassword 'barometro'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.fija
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.fija
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

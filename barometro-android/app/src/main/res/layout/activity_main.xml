@@ -1,0 +1,271 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/scroll"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/app_name"
+                android:textColor="@color/texto"
+                android:textSize="26sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/estadoSensor"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/texto2"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/sinSensor"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/tarjeta"
+            android:padding="16dp"
+            android:text="Este dispositivo no tiene sensor de presión (barómetro). La app necesita un barómetro físico para medir la presión."
+            android:textColor="#FFFFB74D"
+            android:textSize="16sp"
+            android:visibility="gone" />
+
+        <!-- Esfera + datos (horizontal en apaisado, vertical en retrato) -->
+        <LinearLayout
+            android:id="@+id/filaPrincipal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:orientation="horizontal">
+
+            <uy.itrip.barometro.BarometroView
+                android:id="@+id/esfera"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1" />
+
+            <LinearLayout
+                android:id="@+id/panelDatos"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="16dp"
+                android:layout_weight="1"
+                android:background="@drawable/tarjeta"
+                android:orientation="vertical"
+                android:padding="20dp">
+
+                <TextView
+                    android:id="@+id/etqPrincipal"
+                    style="@style/Etiqueta"
+                    android:text="Presión a nivel del mar (QNH)" />
+
+                <TextView
+                    android:id="@+id/valorPrincipal"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="—"
+                    android:textColor="@color/texto"
+                    android:textSize="48sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/valorSecundario"
+                    style="@style/Valor" />
+
+                <TextView
+                    style="@style/Etiqueta"
+                    android:layout_marginTop="16dp"
+                    android:text="Tendencia (3 h)" />
+
+                <TextView
+                    android:id="@+id/tendencia"
+                    style="@style/Valor"
+                    android:textSize="22sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/cambios"
+                    style="@style/Valor"
+                    android:textColor="@color/texto2"
+                    android:textSize="14sp" />
+
+                <TextView
+                    style="@style/Etiqueta"
+                    android:layout_marginTop="16dp"
+                    android:text="Pronóstico orientativo" />
+
+                <TextView
+                    android:id="@+id/pronostico"
+                    style="@style/Valor" />
+
+                <TextView
+                    android:id="@+id/infoSensor"
+                    style="@style/Valor"
+                    android:layout_marginTop="16dp"
+                    android:textColor="@color/texto2"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Gráfico -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/tarjeta"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/Etiqueta"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:text="Historial" />
+
+                <RadioGroup
+                    android:id="@+id/grupoHoras"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <RadioButton android:id="@+id/h6" style="@style/Opcion" android:text="6 h" />
+                    <RadioButton android:id="@+id/h24" style="@style/Opcion" android:text="24 h" />
+                    <RadioButton android:id="@+id/h48" style="@style/Opcion" android:text="48 h" />
+                    <RadioButton android:id="@+id/h168" style="@style/Opcion" android:text="7 d" />
+                </RadioGroup>
+            </LinearLayout>
+
+            <uy.itrip.barometro.GraficoView
+                android:id="@+id/grafico"
+                android:layout_width="match_parent"
+                android:layout_height="240dp"
+                android:layout_marginTop="8dp" />
+        </LinearLayout>
+
+        <!-- Ajustes -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/tarjeta"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView style="@style/Etiqueta" android:text="Ajustes" />
+
+            <RadioGroup
+                android:id="@+id/grupoUnidad"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal">
+
+                <RadioButton android:id="@+id/uHpa" style="@style/Opcion" android:text="hPa" />
+                <RadioButton android:id="@+id/uMmhg" style="@style/Opcion" android:text="mmHg" />
+                <RadioButton android:id="@+id/uInhg" style="@style/Opcion" android:text="inHg" />
+            </RadioGroup>
+
+            <Switch
+                android:id="@+id/swNivelMar"
+                style="@style/Interruptor"
+                android:text="Mostrar presión corregida a nivel del mar" />
+
+            <LinearLayout style="@style/Fila">
+                <TextView style="@style/TextoFila" android:text="Altitud del barómetro (m)" />
+                <EditText
+                    android:id="@+id/altitud"
+                    style="@style/Numero" />
+                <Button
+                    android:id="@+id/btnGps"
+                    style="@style/Boton"
+                    android:text="GPS" />
+            </LinearLayout>
+
+            <LinearLayout style="@style/Fila">
+                <TextView style="@style/TextoFila" android:text="Calibrar con un QNH oficial (hPa)" />
+                <EditText
+                    android:id="@+id/qnhRef"
+                    style="@style/Numero" />
+                <Button
+                    android:id="@+id/btnCalibrar"
+                    style="@style/Boton"
+                    android:text="Calibrar" />
+            </LinearLayout>
+
+            <LinearLayout style="@style/Fila">
+                <TextView
+                    android:id="@+id/txtOffset"
+                    style="@style/TextoFila" />
+                <Button
+                    android:id="@+id/btnQuitarOffset"
+                    style="@style/Boton"
+                    android:text="Quitar" />
+            </LinearLayout>
+
+            <Switch
+                android:id="@+id/swRegistro"
+                style="@style/Interruptor"
+                android:text="Registrar en segundo plano (cada 15 min)" />
+
+            <LinearLayout style="@style/Fila">
+                <Switch
+                    android:id="@+id/swAlerta"
+                    style="@style/Interruptor"
+                    android:layout_width="0dp"
+                    android:layout_marginTop="0dp"
+                    android:layout_weight="1"
+                    android:text="Alerta si la presión cae más de (hPa en 3 h)" />
+                <EditText
+                    android:id="@+id/umbral"
+                    style="@style/Numero" />
+            </LinearLayout>
+
+            <Switch
+                android:id="@+id/swPantalla"
+                style="@style/Interruptor"
+                android:text="Mantener la pantalla encendida" />
+
+            <LinearLayout style="@style/Fila">
+                <Button
+                    android:id="@+id/btnExportar"
+                    style="@style/Boton"
+                    android:text="Exportar CSV" />
+                <Button
+                    android:id="@+id/btnBorrar"
+                    style="@style/Boton"
+                    android:text="Borrar historial" />
+            </LinearLayout>
+
+            <TextView
+                style="@style/Valor"
+                android:layout_marginTop="12dp"
+                android:text="El pronóstico es una regla empírica basada en la presión y su tendencia; no sustituye al parte meteorológico oficial."
+                android:textColor="@color/texto2"
+                android:textSize="12sp" />
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>

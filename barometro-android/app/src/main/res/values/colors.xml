@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="fondo">#FF0E1621</color>
+    <color name="tarjeta">#FF172331</color>
+    <color name="texto">#FFEAF1F8</color>
+    <color name="texto2">#FF93A4B8</color>
+    <color name="acento">#FF4FC3F7</color>
+    <color name="icono_fondo">#FF0E1621</color>
+</resources>

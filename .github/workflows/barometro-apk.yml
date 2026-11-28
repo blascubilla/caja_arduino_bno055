@@ -1,0 +1,25 @@
+name: barometro-apk
+
+on:
+    workflow_dispatch:
+    push:
+        paths:
+            - 'barometro-android/**'
+            - '.github/workflows/barometro-apk.yml'
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-java@v4
+              with:
+                  distribution: temurin
+                  java-version: '17'
+            - name: Compilar APK
+              working-directory: barometro-android
+              run: ./gradlew assembleRelease --no-daemon
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: Barometro-apk
+                  path: barometro-android/app/build/outputs/apk/release/app-release.apk
